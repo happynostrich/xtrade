@@ -1,0 +1,29 @@
+# Example venue configuration. Real values live in `.env` (loaded via
+# src/xtrade/config.py). This file documents the shape of the config and
+# default endpoints used by NautilusTrader adapters.
+
+binance:
+  testnet:
+    spot:
+      base_url_http: "https://testnet.binance.vision"
+      base_url_ws:   "wss://testnet.binance.vision/ws"
+    usdt_futures:
+      base_url_http: "https://testnet.binancefuture.com"
+      base_url_ws:   "wss://stream.binancefuture.com/ws"
+  mainnet:
+    # Mainnet usage in Phase 0 is READ-ONLY market data only.
+    usdt_futures:
+      base_url_http: "https://fapi.binance.com"
+      base_url_ws:   "wss://fstream.binance.com/ws"
+
+hyperliquid:
+  testnet:
+    api_url: "https://api.hyperliquid-testnet.xyz"
+    ws_url:  "wss://api.hyperliquid-testnet.xyz/ws"
+  mainnet:
+    # Mainnet usage in Phase 0 is READ-ONLY market data only.
+    api_url: "https://api.hyperliquid.xyz"
+    ws_url:  "wss://api.hyperliquid.xyz/ws"
+    # trade.xyz HIP-3 perp DEX name (to be confirmed in Task D).
+    # Hyperliquid HIP-3 symbols use `dex:symbol` syntax.
+    tradexyz_dex_candidate: "xyz"
