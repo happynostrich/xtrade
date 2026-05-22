@@ -330,6 +330,16 @@ def backtest_run(
 # ---------------------------------------------------------------------------
 
 
+# Default instrument per venue key for `xtrade live health`. Matches the
+# Phase 0 connectivity scripts (02b / 03) so we know these are reachable
+# on the corresponding testnets.
+_DEFAULT_HEALTH_INSTRUMENTS: dict[str, str] = {
+    "binance_spot": "BTCUSDT.BINANCE",
+    "binance_futures": "BTCUSDT-PERP.BINANCE",
+    "hyperliquid": "BTC-USD-PERP.HYPERLIQUID",
+}
+
+
 @live_app.command("health")
 def live_health(
     venues: str = typer.Option(
@@ -337,13 +347,79 @@ def live_health(
         "--venues",
         help="Comma-separated venue keys from venues yaml.",
     ),
-    timeout: int = typer.Option(60, "--timeout", help="Seconds to wait for first quote per venue."),
+    instruments: str | None = typer.Option(
+        None,
+        "--instrument",
+        help=(
+            "Comma-separated instrument ids to probe instead of the per-venue "
+            "defaults (e.g. ETHUSDT.BINANCE,BTC-USD-PERP.HYPERLIQUID)."
+        ),
+    ),
+    timeout: int = typer.Option(60, "--timeout", help="Seconds to wait for first quote per channel."),
+    venues_yaml: Path = typer.Option(
+        Path("config/venues.testnet.yaml"),
+        "--venues-yaml",
+        help="Path to the venues yaml (default: config/venues.testnet.yaml).",
+    ),
+    run_id: str | None = typer.Option(None, "--run-id", help="Override the auto-generated run id."),
 ) -> None:
     """Start a testnet node, subscribe to one instrument per venue, await first quote."""
-    _not_yet_implemented(
-        task="Phase 1 Task 3 — node health probe",
-        module="xtrade.node.health",
-    )
+    from nautilus_trader.model.identifiers import InstrumentId
+
+    from xtrade.config import ConfigError, MissingCredentialError, load_venues
+    from xtrade.node.factory import MainnetRefusedError
+    from xtrade.node.health import probe
+
+    venue_keys = [v.strip() for v in venues.split(",") if v.strip()]
+    if not venue_keys:
+        raise _exit_config_error("--venues must not be empty.")
+    unknown = [v for v in venue_keys if v not in _DEFAULT_HEALTH_INSTRUMENTS]
+    if unknown:
+        raise _exit_config_error(
+            f"unknown venue keys: {unknown}. "
+            f"Valid: {sorted(_DEFAULT_HEALTH_INSTRUMENTS)}."
+        )
+
+    if instruments:
+        iid_strs = [s.strip() for s in instruments.split(",") if s.strip()]
+    else:
+        iid_strs = [_DEFAULT_HEALTH_INSTRUMENTS[v] for v in venue_keys]
+
+    try:
+        iids = [InstrumentId.from_str(s) for s in iid_strs]
+    except Exception as exc:  # noqa: BLE001
+        raise _exit_config_error(f"failed to parse instrument id: {exc}") from exc
+
+    try:
+        venues_cfg = load_venues(venues_yaml)
+    except (ConfigError, MissingCredentialError) as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    try:
+        result = probe(
+            venues_cfg,
+            instruments=iids,
+            timeout_s=float(timeout),
+            run_id=run_id,
+        )
+    except MainnetRefusedError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    typer.echo(f"run_id:       {result.run_id}")
+    typer.echo(f"summary:      {result.summary_path}")
+    for iid_str, entry in result.summary["per_instrument"].items():
+        if entry["first_quote_iso"] is None:
+            typer.echo(f"  {iid_str}: NO QUOTE within {timeout}s")
+        else:
+            typer.echo(
+                f"  {iid_str}: first_quote={entry['first_quote_iso']} "
+                f"(+{entry['first_quote_latency_ms']} ms)"
+            )
+
+    if not result.passed:
+        typer.echo("health check FAILED (one or more channels saw no quote).", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("health check PASSED.")
 
 
 @live_app.command("run")
