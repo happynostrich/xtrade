@@ -480,7 +480,11 @@ def _build_bridge_strategy(
             except Exception:  # pragma: no cover
                 return
             sym = _SYMBOL_KEY
-            side_str = str(event.order_side)
+            # `str(OrderSide.BUY)` is `"1"` in Nautilus — the underlying
+            # int repr. Use `.name` to get the canonical `"BUY"`/`"SELL"`
+            # string, both for correct sign and for downstream consumers
+            # of `fill_events`.
+            side_str = event.order_side.name
             sign = Decimal(1) if side_str == "BUY" else Decimal(-1)
             self.positions[sym] = self.positions.get(sym, Decimal(0)) + sign * qty
             self.cash_usd -= sign * qty * price
