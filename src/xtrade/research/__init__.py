@@ -8,6 +8,7 @@ layer is execution-free).
 """
 
 from xtrade.research.frames import bars_to_dataframe, bars_to_panel
+from xtrade.research.gridsearch import run_grid
 from xtrade.research.scanners import (
     BreakoutScanner,
     MeanReversionScanner,
@@ -38,4 +39,5 @@ __all__ = [
     "bars_to_panel",
     "get_scanner",
     "load_universe",
+    "run_grid",
 ]
