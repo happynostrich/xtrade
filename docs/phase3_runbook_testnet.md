@@ -245,3 +245,127 @@ These four together let any reviewer reconstruct exactly which signal
 fired, what intent the strategy emitted, what an operator approved,
 and what the exchange acknowledged — the full audit chain Phase 3
 exists to deliver.
+
+---
+
+## 7. Phase 3.5 hardening: pre-flight before Phase 4
+
+Two utilities were added between Phase 3 and Phase 4 to make local
+calibration cheap and to make signal consumption restart-safe. Both
+are pure-Python, no Nautilus, no network — they can run inside a
+notebook, CI job, or pre-deploy script.
+
+### 7.1 Cursor persistence for `SignalConsumer`
+
+The Phase 3 `SignalConsumer` (`src/xtrade/strategy/consumer.py`) carries
+an in-memory `seen` set so `iter_new()` doesn't replay the same signal
+twice within a single process. In Phase 4 the runner is a long-running
+container that will be restarted (deploys, crashes, autoscale events) —
+without a persisted cursor, every restart would replay every signal
+that ever landed on disk.
+
+Pass `cursor_path=<path>` to opt in to disk-persistence; call
+`consumer.commit()` at a safe point (typically: after the downstream
+side-effect — e.g. after a confirmed approval row, or after a fill
+acknowledgement — succeeds). The cursor is **never** auto-flushed,
+because "at-least-once" replay on crash is far safer than silent
+data loss from a hidden flush.
+
+```python
+from pathlib import Path
+from xtrade.research.signals import SignalQueue
+from xtrade.strategy.consumer import SignalConsumer
+
+queue = SignalQueue(Path("data/signals"))
+cursor = Path("data/cursors/momentum_follow.json")
+
+consumer = SignalConsumer(queue, symbol="BTCUSDT-PERP.BINANCE", cursor_path=cursor)
+for sig in consumer.iter_new():
+    ...
+    consumer.commit()   # only after the side-effect succeeds
+```
+
+File I/O for the cursor lives in `xtrade.strategy.cursor` (atomic
+write via `tempfile.mkstemp` + `fsync` + `os.replace`). A missing or
+corrupt cursor file is treated as empty — safe replay is the failure
+mode. Schema is `{"version": 1, "updated_at": <iso>, "seen": [[gen_at,
+symbol, source], ...]}` (`tests/test_signal_consumer.py::test_cursor_file_schema`).
+
+### 7.2 Risk calibration with `xtrade risk dry-run`
+
+Before pushing a `risk.yaml` to testnet or cloud, run the strategy
+against a representative signal locally:
+
+```
+xtrade risk dry-run \
+  --strategy momentum_follow \
+  --instrument BTCUSDT-PERP.BINANCE \
+  --risk-config config/risk.example.yaml \
+  --cash 100000 \
+  --synthetic-direction LONG \
+  --synthetic-strength 0.6 \
+  --synthetic-price 50000
+```
+
+Sample output:
+
+```
+strategy:           momentum_follow
+signal:             BTCUSDT-PERP.BINANCE LONG strength=+0.600 source=cli:risk-dry-run
+rules:              4
+intents generated:  1
+intents approved:   1
+intents rejected:   0
+
+intent[0] APPROVED: BUY 0.002 BTCUSDT-PERP.BINANCE (MARKET)
+  [ok ] max_notional_per_order
+  [ok ] max_position_per_symbol
+  [ok ] max_total_notional
+  [ok ] max_drawdown_pct
+```
+
+What it does:
+
+1. Loads the strategy plugin (no Nautilus, no engine).
+2. Builds an `AccountSnapshot` from `--cash` / `--positions` /
+   `--marks` / `--nav` / `--peak-nav`.
+3. Picks a signal — either by replaying one from `--signals-from`
+   (with optional `--signal-id` composite key) or by synthesising
+   one from `--synthetic-direction` / `--synthetic-strength` /
+   `--synthetic-price`.
+4. Runs `strategy.on_signal(signal, account)`.
+5. Evaluates **every** rule against **every** emitted intent — no
+   short-circuit, so the full matrix shows which rules are inert
+   and which are doing the rejecting.
+6. Renders the report (human-readable by default; `--json` for
+   programmatic consumption).
+
+Calibration recipes:
+
+| symptom | next step |
+| --- | --- |
+| `intents generated: 0` | strategy emitted nothing — check `--positions` (e.g. an already-long position blocks a fresh LONG), or whether the signal metadata includes `last_price` |
+| every rule shows `[ok ]` but no `[FAIL]` | caps are loose; tighten until a synthetic adverse account flips one |
+| every rule shows `[FAIL]` | caps are too tight; loosen until a baseline signal is approved |
+| only one rule ever rejects, others inert | redundant config; either drop the inert rules or pick caps that actually bind |
+| `intents approved: 0` with `drawdown` in the reason | the synthetic `--peak-nav` exceeds `--nav` by more than `max_drawdown_pct` — that's the rule biting; check this is what you intended |
+
+`--signals-from` lets you replay a real signal that was emitted by an
+earlier `xtrade scan run`, which is the recommended way to validate
+risk.yaml against the actual signal distribution before any testnet
+hop:
+
+```
+xtrade risk dry-run \
+  --strategy momentum_follow \
+  --instrument BTCUSDT-PERP.BINANCE \
+  --signals-from data/signals \
+  --risk-config config/risk.yaml \
+  --cash 100000 \
+  --json
+```
+
+Helper contract: `xtrade.risk.dry_run.dry_run(...)` performs no file
+or network I/O (architecturally enforced by
+`tests/test_risk_dry_run.py::test_dry_run_module_has_no_disk_or_network_imports`).
+Safe to call from notebooks, CI, and pre-flight scripts.

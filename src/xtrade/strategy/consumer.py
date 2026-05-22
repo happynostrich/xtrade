@@ -15,9 +15,25 @@ Cursor semantics
 ----------------
 `iter_new()` returns signals whose `dedup_key()` hasn't been yielded
 by this consumer before, in the queue's natural (file-shard) order.
-The cursor is in-memory only — restarts re-read everything; the
-runner is expected to persist its own "last processed" watermark
-externally if it wants to skip historical signals across reboots.
+
+The cursor is **in-memory by default**; pass ``cursor_path=<path>`` to
+also persist it to disk. When a path is given:
+
+  - on construction, the persisted seen-set is loaded (missing or
+    corrupt file → start empty; never raises);
+  - the caller invokes :meth:`commit` at safe points to flush the
+    current in-memory seen-set to disk (atomic-write).
+
+The cursor is **never** auto-flushed on every yield: deciding when a
+signal has been "successfully processed downstream" is the caller's
+job (e.g. a Phase 4 long-running runner commits after each successful
+intent submission). This keeps replay semantics explicit and avoids
+hidden I/O in a hot loop.
+
+All disk I/O for the cursor is delegated to
+:mod:`xtrade.strategy.cursor` so that ``consumer.py`` itself contains
+no direct file I/O — see the architectural guard in
+``tests/test_signal_consumer.py::test_consumer_does_not_open_files_directly``.
 
 Filtering
 ---------
@@ -47,6 +63,7 @@ class SignalConsumer:
         source: str | None = None,
         venue: str | None = None,
         direction: Direction | None = None,
+        cursor_path: Path | str | None = None,
     ) -> None:
         if isinstance(queue, SignalQueue):
             self.queue = queue
@@ -56,7 +73,16 @@ class SignalConsumer:
         self._source = source
         self._venue = venue
         self._direction = direction
+        self._cursor_path: Path | None = (
+            Path(cursor_path) if cursor_path is not None else None
+        )
         self._seen: set[tuple[str, str, str]] = set()
+        if self._cursor_path is not None:
+            # File I/O lives in `xtrade.strategy.cursor` so that this
+            # module's architectural guard (no direct file I/O) holds.
+            from xtrade.strategy import cursor as _cursor_store
+
+            self._seen = _cursor_store.load(self._cursor_path)
 
     # ----- cursor read ---------------------------------------------------
 
@@ -81,8 +107,26 @@ class SignalConsumer:
         return list(self.iter_new())
 
     def reset_cursor(self) -> None:
-        """Clear the seen-set so the next `iter_new()` re-yields everything."""
+        """Clear the seen-set so the next `iter_new()` re-yields everything.
+
+        Does **not** touch the persisted cursor file. Call :meth:`commit`
+        afterwards if you also want the on-disk cursor cleared.
+        """
         self._seen.clear()
+
+    def commit(self) -> None:
+        """Persist the current seen-set to ``cursor_path`` if configured.
+
+        No-op when ``cursor_path`` was not given to the constructor.
+        Safe to call after every batch, or only at shutdown — the
+        atomic-write template means partial failures never leave the
+        cursor file in a half-written state.
+        """
+        if self._cursor_path is None:
+            return
+        from xtrade.strategy import cursor as _cursor_store
+
+        _cursor_store.save(self._cursor_path, self._seen)
 
     # ----- passthrough reads --------------------------------------------
 

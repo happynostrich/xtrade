@@ -42,6 +42,7 @@ scan_app = typer.Typer(help="Phase 2 opportunity discovery: scanners over the ca
 strategy_app = typer.Typer(help="Phase 3 strategy plugin registry: list and describe.")
 paper_app = typer.Typer(help="Phase 3 paper-mode runs: signals + RiskGate + ApprovalGate + BacktestEngine.")
 approve_app = typer.Typer(help="Phase 3 approval queue: list / confirm / reject pending intents.")
+risk_app = typer.Typer(help="Phase 3.5 risk calibration: pre-flight strategy + risk.yaml without I/O.")
 
 app.add_typer(data_app, name="data")
 app.add_typer(backtest_app, name="backtest")
@@ -50,6 +51,7 @@ app.add_typer(scan_app, name="scan")
 app.add_typer(strategy_app, name="strategy")
 app.add_typer(paper_app, name="paper")
 app.add_typer(approve_app, name="approve")
+app.add_typer(risk_app, name="risk")
 
 
 # ---------------------------------------------------------------------------
@@ -1127,6 +1129,251 @@ def paper_run(
     typer.echo(f"fills:              {s['fills']}")
     typer.echo(f"final NAV (USD):    {s['final_nav_usd']}")
     typer.echo(f"summary:            {result.summary_path}")
+
+
+# ---------------------------------------------------------------------------
+# `xtrade risk ...` (Phase 3.5 — calibration helper)
+# ---------------------------------------------------------------------------
+
+
+def _parse_kv_pairs(text: str, *, what: str) -> dict[str, str]:
+    """Parse a ``"K=V,K=V"`` string into a dict; raise BadParameter on errors."""
+    out: dict[str, str] = {}
+    if not text.strip():
+        return out
+    for chunk in text.split(","):
+        c = chunk.strip()
+        if not c:
+            continue
+        if "=" not in c:
+            raise typer.BadParameter(
+                f"--{what} entry {c!r} must be of the form KEY=VALUE"
+            )
+        k, v = c.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            raise typer.BadParameter(f"--{what} entry has empty key: {c!r}")
+        out[k] = v
+    return out
+
+
+@risk_app.command("dry-run")
+def risk_dry_run(
+    strategy: str = typer.Option(..., "--strategy", help="SignalDrivenStrategy registry key."),
+    instrument: str = typer.Option(
+        ..., "--instrument", help="Default symbol (e.g. BTCUSDT-PERP.BINANCE)."
+    ),
+    risk_config: Path | None = typer.Option(
+        None, "--risk-config", help="Path to risk.yaml."
+    ),
+    signals_from: Path | None = typer.Option(
+        None,
+        "--signals-from",
+        help="Replay an existing signal from this SignalQueue root.",
+    ),
+    signal_id: str | None = typer.Option(
+        None,
+        "--signal-id",
+        help="When --signals-from is set: composite '<gen_at>|<symbol>|<source>'; default newest.",
+    ),
+    synthetic_direction: str | None = typer.Option(
+        None,
+        "--synthetic-direction",
+        help="Synthesise a signal: LONG / SHORT / FLAT (mutually exclusive with --signals-from).",
+    ),
+    synthetic_strength: float = typer.Option(
+        0.6, "--synthetic-strength", help="Synthetic signal strength magnitude (0..1)."
+    ),
+    synthetic_price: str = typer.Option(
+        "50000",
+        "--synthetic-price",
+        help="`last_price` stamped into metadata of the synthetic signal.",
+    ),
+    cash: str = typer.Option(
+        "100000", "--cash", help="Cash (USD, Decimal-friendly)."
+    ),
+    positions: str = typer.Option(
+        "", "--positions", help='Comma-separated "SYMBOL=AMT" (e.g. "BTCUSDT-PERP.BINANCE=-0.005").'
+    ),
+    marks: str = typer.Option(
+        "",
+        "--marks",
+        help='Comma-separated "SYMBOL=PRICE"; defaults to "<instrument>=<synthetic-price>".',
+    ),
+    nav: str | None = typer.Option(None, "--nav", help="NAV USD (default: cash)."),
+    peak_nav: str | None = typer.Option(
+        None, "--peak-nav", help="Peak NAV USD (default: nav)."
+    ),
+    strategy_config: str = typer.Option(
+        "",
+        "--strategy-config",
+        help='Comma-separated "KEY=VALUE" passed to the strategy constructor.',
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the full report as JSON on stdout."
+    ),
+) -> None:
+    """Pre-flight a strategy against a signal + risk rules, with no I/O.
+
+    Runs the same chain the paper/live runners walk
+    (``strategy.on_signal`` → every rule individually) but stops short of
+    any side effects: no orders, no jsonl writes, no Nautilus engine.
+    Use it to calibrate a ``risk.yaml`` for a strategy/instrument combo
+    before deploying to testnet or the cloud.
+    """
+    import datetime as _dt
+    import json as _json
+    from decimal import Decimal, InvalidOperation
+
+    import xtrade.strategy  # noqa: F401 - registers plugins
+    from xtrade.research.signals import Signal, SignalQueue
+    from xtrade.risk import dry_run, load_rules_from_yaml
+    from xtrade.strategy.base import (
+        AccountSnapshot,
+        StrategyRegistrationError,
+        available_strategies,
+        load_strategy,
+    )
+
+    # ---- mutual exclusivity of signal sources --------------------------
+    if signals_from is not None and synthetic_direction is not None:
+        raise _exit_config_error(
+            "--signals-from and --synthetic-direction are mutually exclusive."
+        )
+
+    # ---- strategy ------------------------------------------------------
+    cfg_pairs = _parse_kv_pairs(strategy_config, what="strategy-config")
+    try:
+        strat = load_strategy(strategy, config=cfg_pairs or None)
+    except StrategyRegistrationError as exc:
+        raise _exit_config_error(
+            f"unknown strategy {strategy!r}; available: {available_strategies()}"
+        ) from exc
+
+    # ---- rules ---------------------------------------------------------
+    rules = []
+    if risk_config is not None:
+        try:
+            rules = load_rules_from_yaml(risk_config)
+        except (FileNotFoundError, ValueError) as exc:
+            raise _exit_config_error(str(exc)) from exc
+
+    # ---- account -------------------------------------------------------
+    try:
+        cash_d = Decimal(cash)
+        nav_d = Decimal(nav) if nav is not None else cash_d
+        peak_d = Decimal(peak_nav) if peak_nav is not None else nav_d
+    except (InvalidOperation, ValueError) as exc:
+        raise _exit_config_error(f"--cash/--nav/--peak-nav must be decimals: {exc}") from exc
+
+    pos_raw = _parse_kv_pairs(positions, what="positions")
+    try:
+        pos_d = {k: Decimal(v) for k, v in pos_raw.items()}
+    except (InvalidOperation, ValueError) as exc:
+        raise _exit_config_error(f"--positions amounts must be decimals: {exc}") from exc
+
+    marks_raw = _parse_kv_pairs(marks, what="marks")
+    if not marks_raw:
+        marks_raw = {instrument: synthetic_price}
+    try:
+        marks_d = {k: Decimal(v) for k, v in marks_raw.items()}
+    except (InvalidOperation, ValueError) as exc:
+        raise _exit_config_error(f"--marks prices must be decimals: {exc}") from exc
+
+    account = AccountSnapshot(
+        cash_usd=cash_d,
+        positions=pos_d,
+        mark_prices=marks_d,
+        nav_usd=nav_d,
+        peak_nav_usd=peak_d,
+    )
+
+    # ---- signal --------------------------------------------------------
+    sig: Signal
+    if signals_from is not None:
+        from xtrade.strategy.consumer import SignalConsumer
+
+        queue = SignalQueue(signals_from)
+        consumer = SignalConsumer(queue, symbol=instrument)
+        all_sigs = consumer.list_all()
+        if not all_sigs:
+            raise _exit_config_error(
+                f"no signals matched --instrument={instrument!r} in {signals_from}"
+            )
+        if signal_id is None:
+            sig = all_sigs[-1]
+        else:
+            picked = None
+            for s in all_sigs:
+                composite = "|".join([s.generated_at.isoformat(), s.symbol, s.source])
+                if composite == signal_id:
+                    picked = s
+                    break
+            if picked is None:
+                raise _exit_config_error(
+                    f"no signal with composite id {signal_id!r} in queue."
+                )
+            sig = picked
+    else:
+        direction = (synthetic_direction or "LONG").upper()
+        if direction not in {"LONG", "SHORT", "FLAT"}:
+            raise _exit_config_error(
+                f"--synthetic-direction must be LONG/SHORT/FLAT, got {synthetic_direction!r}"
+            )
+        if synthetic_strength < 0 or synthetic_strength > 1:
+            raise _exit_config_error(
+                f"--synthetic-strength must be in [0, 1], got {synthetic_strength}"
+            )
+        signed_strength = (
+            synthetic_strength
+            if direction == "LONG"
+            else (-synthetic_strength if direction == "SHORT" else 0.0)
+        )
+        sig = Signal(
+            symbol=instrument,
+            venue=instrument.split(".")[-1].lower() if "." in instrument else "binance",
+            direction=direction,  # type: ignore[arg-type]
+            strength=signed_strength,
+            generated_at=_dt.datetime.now(tz=_dt.timezone.utc),
+            source="cli:risk-dry-run",
+            metadata={"last_price": synthetic_price},
+        )
+
+    # ---- run + render --------------------------------------------------
+    report = dry_run(strategy=strat, signal=sig, account=account, rules=rules)
+
+    if as_json:
+        typer.echo(_json.dumps(report.to_dict(), indent=2, default=str))
+        return
+
+    typer.echo(f"strategy:           {report.strategy}")
+    typer.echo(
+        f"signal:             {sig.symbol} {sig.direction} "
+        f"strength={sig.strength:+.3f} source={sig.source}"
+    )
+    typer.echo(f"rules:              {len(rules)}")
+    typer.echo(f"intents generated:  {report.intents_generated}")
+    typer.echo(f"intents approved:   {report.intents_approved}")
+    typer.echo(f"intents rejected:   {report.intents_rejected}")
+
+    for i, ev in enumerate(report.intents):
+        verdict = "APPROVED" if ev.aggregate_approved else "REJECTED"
+        typer.echo(
+            f"\nintent[{i}] {verdict}: {ev.intent.side} {ev.intent.quantity} "
+            f"{ev.intent.symbol} ({ev.intent.order_type}"
+            + (", reduce_only" if ev.intent.reduce_only else "")
+            + ")"
+        )
+        if not ev.rule_results:
+            typer.echo("  (no rules configured)")
+        for r in ev.rule_results:
+            status = "ok " if r["ok"] else "FAIL"
+            reason = f"  — {r['reason']}" if r["reason"] else ""
+            typer.echo(f"  [{status}] {r['name']}{reason}")
+
+    if report.intents_generated == 0:
+        typer.echo("\nNote: strategy emitted no intent for this signal/account combo.")
 
 
 def main() -> None:  # pragma: no cover - thin shim

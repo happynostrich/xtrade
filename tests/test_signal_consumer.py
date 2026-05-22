@@ -164,6 +164,107 @@ def test_list_all_applies_filters(tmp_path: Path) -> None:
     assert len(consumer.list_all()) == 1
 
 
+# ---- cursor persistence (Phase 3.5) -------------------------------------
+
+
+def test_cursor_persistence_round_trip(tmp_path: Path) -> None:
+    """After `commit()`, a new consumer with the same cursor path skips replay."""
+    queue_root = tmp_path / "signals"
+    cursor_path = tmp_path / "cursors" / "momentum_follow.json"
+
+    queue = SignalQueue(queue_root)
+    queue.append([_sig(h=10), _sig(h=11)])
+
+    c1 = SignalConsumer(queue, cursor_path=cursor_path)
+    assert len(c1.drain()) == 2
+    c1.commit()
+
+    assert cursor_path.exists(), "commit() must create the cursor file"
+
+    # New consumer instance, same cursor path: no replay.
+    c2 = SignalConsumer(queue, cursor_path=cursor_path)
+    assert c2.drain() == []
+
+    # A new signal lands; only it should be yielded.
+    queue.append([_sig(h=12)])
+    new = c2.drain()
+    assert len(new) == 1
+    assert new[0].generated_at.hour == 12
+
+    # Commit again; restart again; still no replay.
+    c2.commit()
+    c3 = SignalConsumer(queue, cursor_path=cursor_path)
+    assert c3.drain() == []
+
+
+def test_cursor_commit_without_path_is_noop(tmp_path: Path) -> None:
+    """`commit()` is a no-op (no exception, no file) when no `cursor_path`."""
+    queue = SignalQueue(tmp_path / "signals")
+    queue.append([_sig(h=10)])
+
+    c = SignalConsumer(queue)  # no cursor_path
+    c.drain()
+    c.commit()  # must not raise
+
+    # Nothing should have been written anywhere under tmp_path/cursors/.
+    assert not (tmp_path / "cursors").exists()
+
+
+def test_cursor_corrupt_file_safe_replay(tmp_path: Path) -> None:
+    """A corrupt cursor file is treated as empty (safer than crashing)."""
+    queue = SignalQueue(tmp_path / "signals")
+    queue.append([_sig(h=10)])
+
+    cursor_path = tmp_path / "cursor.json"
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_path.write_text("definitely not json {{{", encoding="utf-8")
+
+    c = SignalConsumer(queue, cursor_path=cursor_path)
+    # Corrupt file → empty seen → first drain replays the signal.
+    assert len(c.drain()) == 1
+
+
+def test_cursor_atomic_write(tmp_path: Path) -> None:
+    """`commit()` leaves no `.cursor.*.tmp` stragglers in the target dir."""
+    queue = SignalQueue(tmp_path / "signals")
+    queue.append([_sig(h=10), _sig(h=11)])
+
+    # Use an isolated dir so we don't see the queue's directory listing.
+    cursor_dir = tmp_path / "cursors"
+    cursor_path = cursor_dir / "momentum_follow.json"
+    c = SignalConsumer(queue, cursor_path=cursor_path)
+    c.drain()
+    c.commit()
+
+    # No `.cursor.*.tmp` stragglers in the cursor directory.
+    leftovers = [p.name for p in cursor_dir.iterdir() if p.name.startswith(".cursor.")]
+    assert leftovers == [], f"unexpected tempfile stragglers: {leftovers}"
+    # And the cursor file itself is there.
+    assert cursor_path.exists()
+
+
+def test_cursor_file_schema(tmp_path: Path) -> None:
+    """The persisted cursor JSON has the documented shape."""
+    import json as _json
+
+    queue = SignalQueue(tmp_path / "signals")
+    queue.append([_sig(h=10)])
+
+    cursor_path = tmp_path / "cursor.json"
+    c = SignalConsumer(queue, cursor_path=cursor_path)
+    c.drain()
+    c.commit()
+
+    payload = _json.loads(cursor_path.read_text())
+    assert payload["version"] == 1
+    assert isinstance(payload["updated_at"], str)
+    assert isinstance(payload["seen"], list)
+    assert len(payload["seen"]) == 1
+    row = payload["seen"][0]
+    assert isinstance(row, list) and len(row) == 3
+    assert all(isinstance(c, str) for c in row)
+
+
 # ---- contract boundary: consumer never reads jsonl directly -------------
 
 

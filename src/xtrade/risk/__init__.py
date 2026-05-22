@@ -14,6 +14,7 @@ Public surface
 See `docs/phase3_brief.md` §5 Task 2 and §6 (security boundary).
 """
 
+from xtrade.risk.dry_run import DryRunReport, IntentEvaluation, dry_run
 from xtrade.risk.gate import (
     RiskDecision,
     RiskGate,
@@ -29,6 +30,8 @@ from xtrade.risk.rules import (
 )
 
 __all__ = [
+    "DryRunReport",
+    "IntentEvaluation",
     "MaxDrawdownPct",
     "MaxNotionalPerOrder",
     "MaxPositionPerSymbol",
@@ -37,5 +40,6 @@ __all__ = [
     "RiskGate",
     "RiskRule",
     "RuleResult",
+    "dry_run",
     "load_rules_from_yaml",
 ]
