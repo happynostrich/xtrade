@@ -198,33 +198,56 @@ def probe(
     if not instruments:
         raise ValueError("probe(): `instruments` must contain at least one InstrumentId.")
 
+    # Eagerly refuse mainnet so the caller sees the error before any
+    # log dir is created or TradingNode is constructed.
+    from xtrade.node.factory import _assert_testnet_only
+
+    _assert_testnet_only(venues_cfg)
+
     repo_root = Path(__file__).resolve().parents[3]
     logs_root_p = Path(logs_root) if logs_root is not None else (repo_root / "logs")
     run_id = _resolve_run_id(run_id)
     log_dir = logs_root_p / run_id
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    node = build_testnet_node(
-        venues_cfg,
-        trader_id=trader_id,
-        log_level=log_level,
-        log_directory=log_dir,
-    )
-    strategy = _HealthProbeStrategy(
-        config=_HealthProbeConfig(
-            instrument_ids=tuple(instruments),
-            timeout_s=timeout_s,
-        ),
-    )
-    node.trader.add_strategy(strategy)
+    # TradingNode.__init__ captures `asyncio.get_event_loop()` at
+    # construction time; if we build the node *outside* asyncio.run the
+    # engines latch onto a loop that never runs and the data client's
+    # _connect coroutine is never awaited (silent connection failure).
+    # We therefore construct the node, add the strategy, build, and run
+    # all inside one coroutine driven by asyncio.run.
+    strategy_holder: dict[str, _HealthProbeStrategy] = {}
+    node_holder: dict[str, Any] = {}
+
+    async def _orchestrate() -> None:
+        node = build_testnet_node(
+            venues_cfg,
+            trader_id=trader_id,
+            log_level=log_level,
+            log_directory=log_dir,
+        )
+        node_holder["node"] = node
+        strategy = _HealthProbeStrategy(
+            config=_HealthProbeConfig(
+                instrument_ids=tuple(instruments),
+                timeout_s=timeout_s,
+            ),
+        )
+        strategy_holder["strategy"] = strategy
+        node.trader.add_strategy(strategy)
+        await _run_node_until(node, strategy.done, timeout_s=timeout_s + 30.0)
 
     try:
-        asyncio.run(_run_node_until(node, strategy.done, timeout_s=timeout_s + 30.0))
+        asyncio.run(_orchestrate())
     finally:
-        try:
-            node.dispose()
-        except Exception:  # noqa: BLE001
-            pass
+        node = node_holder.get("node")
+        if node is not None:
+            try:
+                node.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+
+    strategy = strategy_holder["strategy"]
 
     # Build the summary.
     per_instrument: dict[str, dict[str, Any]] = {}

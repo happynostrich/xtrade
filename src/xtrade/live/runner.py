@@ -219,35 +219,56 @@ def run_live(
     log_dir = logs_root_p / run_id
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build node. Mainnet refusal happens here.
-    node = build_testnet_node(
-        venues_cfg,
-        trader_id=trader_id,
-        log_level=log_level,
-        log_directory=log_dir,
-    )
+    # Eagerly refuse mainnet so callers see the error before any log
+    # directory is created or TradingNode is constructed.
+    from xtrade.node.factory import _assert_testnet_only
 
-    probe = LiveOrderProbe(
-        config=LiveOrderProbeConfig(
-            mode="live",
-            instrument_id=iid,
-            quantity=quantity,
-            side=side,
-            safety_multiplier=safety_multiplier,
-            timeout_s=timeout_s,
-        ),
-    )
-    node.trader.add_strategy(probe)
+    _assert_testnet_only(venues_cfg)
+
+    # TradingNode.__init__ captures `asyncio.get_event_loop()` and the
+    # engines latch onto that specific loop forever. Constructing the
+    # node outside asyncio.run leaves the engines bound to a loop that
+    # never runs, so data/exec client `_connect` coroutines are never
+    # awaited (silent failure). We therefore build the node, register
+    # the strategy, and run all inside one orchestrating coroutine.
+    probe_holder: dict[str, LiveOrderProbe] = {}
+    node_holder: dict[str, Any] = {}
+
+    async def _orchestrate() -> None:
+        node = build_testnet_node(
+            venues_cfg,
+            trader_id=trader_id,
+            log_level=log_level,
+            log_directory=log_dir,
+        )
+        node_holder["node"] = node
+        probe = LiveOrderProbe(
+            config=LiveOrderProbeConfig(
+                mode="live",
+                instrument_id=iid,
+                quantity=quantity,
+                side=side,
+                safety_multiplier=safety_multiplier,
+                timeout_s=timeout_s,
+            ),
+        )
+        probe_holder["probe"] = probe
+        node.trader.add_strategy(probe)
+        await _run_node_until(node, probe.done, timeout_s=timeout_s + 30.0)
 
     t0 = time.monotonic()
     try:
-        asyncio.run(_run_node_until(node, probe.done, timeout_s=timeout_s + 30.0))
+        asyncio.run(_orchestrate())
     finally:
-        try:
-            node.dispose()
-        except Exception:  # noqa: BLE001
-            pass
+        node = node_holder.get("node")
+        if node is not None:
+            try:
+                node.dispose()
+            except Exception:  # noqa: BLE001
+                pass
     elapsed_s = round(time.monotonic() - t0, 3)
+    probe = probe_holder["probe"]
+    node = node_holder["node"]
 
     venue = iid.venue
     account_snapshot = _account_snapshot(node, venue)
