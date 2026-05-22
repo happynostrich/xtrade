@@ -5,21 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "xtrade"
 version = "0.0.1"
-description = "xtrade — multi-venue automated trading research project (Phase 0)"
+description = "xtrade — multi-venue automated trading research project"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 license = { text = "Proprietary" }
 authors = [{ name = "xtrade" }]
 
-# Phase 0 dependencies are intentionally minimal.
-# NautilusTrader is the engine; httpx is used for the raw Hyperliquid
-# info-endpoint enumeration in Task D (no SDK needed).
+# Runtime dependencies. NautilusTrader is the engine; httpx is used for
+# raw Hyperliquid info-endpoint queries (no SDK needed). typer is the
+# CLI framework for the `xtrade` console entry point.
 dependencies = [
     "nautilus_trader>=1.227",
     "python-dotenv>=1.0",
     "httpx>=0.27",
     "pandas>=2.2",
     "pyyaml>=6.0",
+    "typer>=0.12",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,9 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
 ]
+
+[project.scripts]
+xtrade = "xtrade.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -53,12 +53,12 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Data / logs
-data/
+# Data / logs (top-level only; `src/xtrade/data/` is package code)
+/data/
 *.log
-logs/
-catalog/
-nautilus_data/
+/logs/
+/catalog/
+/nautilus_data/
 
 # Notebooks
 .ipynb_checkpoints/
