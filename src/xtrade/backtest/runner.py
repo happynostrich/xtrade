@@ -178,7 +178,12 @@ def run_backtest(
     engine = BacktestEngine(
         config=BacktestEngineConfig(
             trader_id="BACKTESTER-001",
-            logging=LoggingConfig(log_level="WARN"),
+            logging=LoggingConfig(
+                log_level="WARN",
+                log_level_file="INFO",
+                log_directory=str(log_dir),
+                log_file_name="run",
+            ),
         ),
     )
     engine.add_venue(

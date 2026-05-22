@@ -1,13 +1,22 @@
 """xtrade command-line interface.
 
 Typer-based entry point exposing three subcommand groups (`data`,
-`backtest`, `live`). Subcommands are filled in by Phase 1 Tasks 3–6.
+`backtest`, `live`).
 
-Exit code contract (P7, partial — full plumbing lands in Task 7):
-  0  success
-  1  business failure (e.g. order rejected, no quote in timeout)
+Exit code contract (Phase 1 Task 7 / P7):
+  0  business success
+  1  business failure (e.g. order rejected, no quote within timeout)
   2  configuration / precondition failure (missing env, bad config,
-     not-yet-implemented commands)
+     unknown strategy / venue, etc.)
+
+Every non-trivial command runs inside a `run_with_logging(...)` context
+(see `xtrade.observability`) so all runs share the same on-disk layout
+under `logs/<run-id>/`:
+
+  - `run.log`             — Nautilus output (kernel-written)
+  - `summary.json`        — runner-written headline result
+  - `config.snapshot.yaml` — verbatim copy of the venues yaml that
+                             drove the run (env-var names only; safe)
 """
 
 from __future__ import annotations
@@ -273,6 +282,7 @@ def backtest_run(
     from decimal import Decimal, InvalidOperation
 
     from xtrade.backtest.runner import available_strategies, run_backtest
+    from xtrade.observability import run_with_logging
 
     if strategy not in available_strategies():
         raise _exit_config_error(
@@ -295,19 +305,21 @@ def backtest_run(
         raise _exit_config_error(f"--until ({until}) must be after --since ({since})")
 
     try:
-        result = run_backtest(
-            catalog_path=catalog_path,
-            instrument_id=instrument,
-            bar=bar,
-            strategy=strategy,
-            trade_size=ts,
-            fast_ema_period=fast_ema_period,
-            slow_ema_period=slow_ema_period,
-            since_ns=since_ns,
-            until_ns=until_ns,
-            starting_balance=starting_balance,
-            run_id=run_id,
-        )
+        with run_with_logging(mode="backtest", run_id=run_id) as ctx:
+            result = run_backtest(
+                catalog_path=catalog_path,
+                instrument_id=instrument,
+                bar=bar,
+                strategy=strategy,
+                trade_size=ts,
+                fast_ema_period=fast_ema_period,
+                slow_ema_period=slow_ema_period,
+                since_ns=since_ns,
+                until_ns=until_ns,
+                starting_balance=starting_balance,
+                run_id=ctx.run_id,
+                logs_root=ctx.logs_root,
+            )
     except FileNotFoundError as exc:
         raise _exit_config_error(str(exc)) from exc
     except ValueError as exc:
@@ -369,6 +381,7 @@ def live_health(
     from xtrade.config import ConfigError, MissingCredentialError, load_venues
     from xtrade.node.factory import MainnetRefusedError
     from xtrade.node.health import probe
+    from xtrade.observability import run_with_logging
 
     venue_keys = [v.strip() for v in venues.split(",") if v.strip()]
     if not venue_keys:
@@ -396,12 +409,16 @@ def live_health(
         raise _exit_config_error(str(exc)) from exc
 
     try:
-        result = probe(
-            venues_cfg,
-            instruments=iids,
-            timeout_s=float(timeout),
-            run_id=run_id,
-        )
+        with run_with_logging(
+            mode="health", run_id=run_id, venues_cfg=venues_cfg
+        ) as ctx:
+            result = probe(
+                venues_cfg,
+                instruments=iids,
+                timeout_s=float(timeout),
+                run_id=ctx.run_id,
+                logs_root=ctx.logs_root,
+            )
     except MainnetRefusedError as exc:
         raise _exit_config_error(str(exc)) from exc
 
@@ -461,6 +478,7 @@ def live_run(
     from xtrade.config import ConfigError, MissingCredentialError, load_venues
     from xtrade.live.runner import available_live_strategies, run_live
     from xtrade.node.factory import MainnetRefusedError
+    from xtrade.observability import run_with_logging
 
     if strategy not in available_live_strategies():
         raise _exit_config_error(
@@ -483,16 +501,20 @@ def live_run(
         raise _exit_config_error(str(exc)) from exc
 
     try:
-        result = run_live(
-            venues_cfg,
-            instrument_id=instrument,
-            strategy=strategy,
-            quantity=qty,
-            side=side.upper(),
-            safety_multiplier=mult,
-            timeout_s=float(timeout),
-            run_id=run_id,
-        )
+        with run_with_logging(
+            mode="live", run_id=run_id, venues_cfg=venues_cfg
+        ) as ctx:
+            result = run_live(
+                venues_cfg,
+                instrument_id=instrument,
+                strategy=strategy,
+                quantity=qty,
+                side=side.upper(),
+                safety_multiplier=mult,
+                timeout_s=float(timeout),
+                run_id=ctx.run_id,
+                logs_root=ctx.logs_root,
+            )
     except MainnetRefusedError as exc:
         raise _exit_config_error(str(exc)) from exc
 

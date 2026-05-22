@@ -196,7 +196,12 @@ def probe(
     log_dir = logs_root_p / run_id
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    node = build_testnet_node(venues_cfg, trader_id=trader_id, log_level=log_level)
+    node = build_testnet_node(
+        venues_cfg,
+        trader_id=trader_id,
+        log_level=log_level,
+        log_directory=log_dir,
+    )
     strategy = _HealthProbeStrategy(
         config=_HealthProbeConfig(
             instrument_ids=tuple(instruments),

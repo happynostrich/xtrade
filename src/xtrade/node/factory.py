@@ -22,6 +22,7 @@ and `scripts/phase0/03_hyperliquid_testnet_connectivity.py`.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from xtrade.config import (
@@ -193,6 +194,7 @@ def build_testnet_node(
     *,
     trader_id: str = "XTRADE-NODE-001",
     log_level: str = "INFO",
+    log_directory: Path | str | None = None,
 ) -> "TradingNode":
     """Build (but don't call `.build()` on) a multi-venue testnet TradingNode.
 
@@ -204,6 +206,10 @@ def build_testnet_node(
         Stamped into Nautilus's trader id (shows up in client order ids).
     log_level : str
         Forwarded to `LoggingConfig.log_level`.
+    log_directory : Path | str | None
+        If set, Nautilus writes `<log_directory>/run.log` (Phase 1 Task 7).
+        `log_level_file` is also set to `log_level` so file output is
+        actually emitted (Nautilus suppresses file logs without it).
 
     Returns
     -------
@@ -249,9 +255,19 @@ def build_testnet_node(
             "should have raised earlier."
         )
 
+    if log_directory is not None:
+        logging_cfg = LoggingConfig(
+            log_level=log_level,
+            log_level_file=log_level,
+            log_directory=str(log_directory),
+            log_file_name="run",
+        )
+    else:
+        logging_cfg = LoggingConfig(log_level=log_level)
+
     node_cfg = TradingNodeConfig(
         trader_id=trader_id,
-        logging=LoggingConfig(log_level=log_level),
+        logging=logging_cfg,
         data_engine=LiveDataEngineConfig(),
         exec_engine=LiveExecEngineConfig(),
         data_clients=data_clients,

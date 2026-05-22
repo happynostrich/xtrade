@@ -213,7 +213,12 @@ def run_live(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Build node. Mainnet refusal happens here.
-    node = build_testnet_node(venues_cfg, trader_id=trader_id, log_level=log_level)
+    node = build_testnet_node(
+        venues_cfg,
+        trader_id=trader_id,
+        log_level=log_level,
+        log_directory=log_dir,
+    )
 
     probe = LiveOrderProbe(
         config=LiveOrderProbeConfig(
