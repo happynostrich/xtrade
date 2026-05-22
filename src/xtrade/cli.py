@@ -1,36 +1,20 @@
 """xtrade command-line interface.
 
-This is the Phase 1 Task 1 deliverable (P1): a typer-based entry point
-exposing three subcommand groups (`data`, `backtest`, `live`). The
-groups and command names are pinned now so later tasks can fill in
-implementations without renaming.
+Typer-based entry point exposing three subcommand groups (`data`,
+`backtest`, `live`). Subcommands are filled in by Phase 1 Tasks 3–6.
 
-Phase mapping:
-
-  data ingest        -> Task 4 (historical data pipeline)
-  data inspect       -> Task 4 (read catalog metadata)
-  backtest run       -> Task 5 (offline EMA-cross on catalog bars)
-  live run           -> Task 6 (testnet TradingNode probe)
-  live health        -> Task 3 (subscribe-only health check)
-
-Until each underlying module is implemented, the commands raise a
-clear NotImplementedError that points at the responsible task. This
-lets `xtrade --help` and `xtrade <group> --help` work for users while
-the rest of Phase 1 is in progress.
-
-Exit codes (P7 contract, partial — full plumbing lands in Task 7):
+Exit code contract (P7, partial — full plumbing lands in Task 7):
   0  success
   1  business failure (e.g. order rejected, no quote in timeout)
-  2  configuration / precondition failure (missing env, bad config)
-
-Until Task 7 is done, NotImplementedError is mapped to exit code 2
-because "this command is not yet wired" is a configuration-class issue
-from the user's perspective.
+  2  configuration / precondition failure (missing env, bad config,
+     not-yet-implemented commands)
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
+from pathlib import Path
 
 import typer
 
@@ -52,6 +36,51 @@ app.add_typer(live_app, name="live")
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_iso_to_ms(text: str, *, end_of_day: bool = False) -> int:
+    """Parse an ISO-8601 date / datetime to epoch ms (UTC).
+
+    Bare dates (`YYYY-MM-DD`) snap to 00:00:00 UTC; `end_of_day=True`
+    bumps the result to the next-day boundary (exclusive end), matching
+    Binance/HL's `endTime` semantics.
+    """
+    s = text.strip()
+    try:
+        if "T" in s or " " in s.replace("T", ""):
+            ts = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        else:
+            ts = dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc)
+    except ValueError as exc:
+        raise typer.BadParameter(f"Invalid ISO datetime: {text!r}") from exc
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    if end_of_day and "T" not in s and " " not in s:
+        ts = ts + dt.timedelta(days=1)
+    return int(ts.timestamp() * 1000)
+
+
+def _exit_config_error(message: str) -> "typer.Exit":
+    """Print a config error to stderr and return a typer.Exit(2)."""
+    typer.echo(f"error: {message}", err=True)
+    return typer.Exit(code=2)
+
+
+def _not_yet_implemented(*, task: str, module: str) -> None:
+    """Exit with code 2 and a clear pointer to the task that fills this in."""
+    msg = (
+        f"This command is not yet implemented.\n"
+        f"  Responsible task: {task}\n"
+        f"  Module(s):        {module}\n"
+        f"See docs/phase1_brief.md §5 for the full task list."
+    )
+    typer.echo(msg, err=True)
+    raise typer.Exit(code=2)
+
+
+# ---------------------------------------------------------------------------
 # `xtrade data ...`
 # ---------------------------------------------------------------------------
 
@@ -62,25 +91,161 @@ def data_ingest(
     symbol: str = typer.Option(..., "--symbol", help="e.g. BTCUSDT or xyz:TSLA"),
     bar: str = typer.Option("1m", "--bar", help="Bar spec, e.g. 1m, 5m, 1h"),
     since: str = typer.Option(..., "--since", help="ISO-8601 start, e.g. 2026-05-01"),
-    until: str | None = typer.Option(None, "--until", help="ISO-8601 end (default: now)"),
+    until: str | None = typer.Option(None, "--until", help="ISO-8601 end (default: now UTC)"),
+    catalog_path: Path | None = typer.Option(
+        None, "--catalog", help="Catalog root (default: <repo>/data/catalog)"
+    ),
+    dex: str | None = typer.Option(
+        None,
+        "--dex",
+        help="Hyperliquid HIP-3 dex name (default: parse from `dex:SYMBOL`)",
+    ),
 ) -> None:
     """Fetch historical bars and append them to the local catalog (idempotent)."""
-    _not_yet_implemented(
-        task="Phase 1 Task 4 — data ingest pipeline",
-        module="xtrade.data.binance_klines / xtrade.data.hyperliquid_hip3",
+    from xtrade.data import binance_klines, hyperliquid_hip3
+    from xtrade.data.catalog import (
+        bar_type_for,
+        intervals_for,
+        missing_intervals,
+        open_catalog,
+        parse_bar_spec,
+        write_bars,
     )
+    from xtrade.data.instruments import InstrumentResolutionError, resolve
+
+    venue_l = venue.lower()
+    if venue_l not in ("binance", "hyperliquid"):
+        raise _exit_config_error(f"--venue must be 'binance' or 'hyperliquid', got {venue!r}")
+
+    try:
+        spec = parse_bar_spec(bar)
+    except ValueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    start_ms = _parse_iso_to_ms(since)
+    if until is None:
+        end_ms = int(
+            dt.datetime.now(tz=dt.timezone.utc).replace(second=0, microsecond=0).timestamp() * 1000
+        )
+    else:
+        end_ms = _parse_iso_to_ms(until, end_of_day=True)
+    if end_ms <= start_ms:
+        raise _exit_config_error(f"--until ({until}) must be after --since ({since})")
+
+    try:
+        if venue_l == "hyperliquid":
+            instrument = resolve(venue_l, symbol, dex=dex, mainnet=True)
+        else:
+            instrument = resolve(venue_l, symbol)
+    except InstrumentResolutionError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    bar_type = bar_type_for(instrument, spec)
+    catalog = open_catalog(catalog_path)
+    start_ns = start_ms * 1_000_000
+    end_ns = end_ms * 1_000_000
+
+    missing = missing_intervals(catalog, bar_type, start_ns, end_ns)
+    typer.echo(
+        f"ingest target: {bar_type} from "
+        f"{dt.datetime.fromtimestamp(start_ms / 1000, tz=dt.timezone.utc).isoformat()} to "
+        f"{dt.datetime.fromtimestamp(end_ms / 1000, tz=dt.timezone.utc).isoformat()}"
+    )
+    if not missing:
+        typer.echo("catalog already covers the requested range; nothing to do.")
+        existing = intervals_for(catalog, bar_type)
+        typer.echo(f"existing intervals: {existing}")
+        return
+
+    typer.echo(f"missing intervals: {len(missing)}")
+    total = 0
+    interval = spec.binance_interval() if venue_l == "binance" else spec.hyperliquid_interval()
+    for start_ns_chunk, end_ns_chunk in missing:
+        if venue_l == "binance":
+            bars = binance_klines.fetch_bars(
+                symbol=symbol,
+                interval=interval,
+                start_ms=start_ns_chunk // 1_000_000,
+                end_ms=end_ns_chunk // 1_000_000,
+                instrument=instrument,
+                bar_type=bar_type,
+            )
+        else:
+            # Hyperliquid: ensure we have a `dex` to query and a bare ticker.
+            if ":" in symbol:
+                dex_arg, ticker = symbol.split(":", 1)
+            else:
+                if dex is None:
+                    raise _exit_config_error(
+                        "Hyperliquid HIP-3 ingest requires either `--dex` or "
+                        "a `dex:TICKER` --symbol."
+                    )
+                dex_arg, ticker = dex, symbol
+            bars = hyperliquid_hip3.fetch_bars(
+                dex=dex_arg,
+                symbol=ticker,
+                interval=interval,
+                start_ms=start_ns_chunk // 1_000_000,
+                end_ms=end_ns_chunk // 1_000_000,
+                instrument=instrument,
+                bar_type=bar_type,
+                mainnet=True,
+            )
+        wrote = write_bars(catalog, instrument, bars)
+        total += wrote
+        typer.echo(
+            f"  chunk {start_ns_chunk}..{end_ns_chunk}: "
+            f"{wrote} bars written"
+        )
+
+    typer.echo(f"done. total bars written this run: {total}")
+    typer.echo(f"intervals now: {intervals_for(catalog, bar_type)}")
 
 
 @data_app.command("inspect")
 def data_inspect(
-    venue: str | None = typer.Option(None, "--venue"),
-    symbol: str | None = typer.Option(None, "--symbol"),
+    catalog_path: Path | None = typer.Option(
+        None, "--catalog", help="Catalog root (default: <repo>/data/catalog)"
+    ),
 ) -> None:
     """List instruments and bar ranges currently held in the catalog."""
-    _not_yet_implemented(
-        task="Phase 1 Task 4 — catalog inspector",
-        module="xtrade.data.catalog",
-    )
+    from nautilus_trader.model.data import Bar
+
+    from xtrade.data.catalog import open_catalog
+
+    catalog = open_catalog(catalog_path)
+    instruments = catalog.instruments()
+    typer.echo(f"catalog root: {catalog.path}")
+    typer.echo(f"instruments: {len(instruments)}")
+    for inst in instruments:
+        typer.echo(f"  - {inst.id}  "
+                   f"(price_precision={inst.price_precision}, "
+                   f"size_precision={inst.size_precision})")
+
+    # List bar identifiers via Nautilus's directory listing.
+    bar_ids = catalog.list_data_types()  # returns list[str]
+    typer.echo(f"data types: {len(bar_ids)}")
+    for dtype in bar_ids:
+        typer.echo(f"  - {dtype}")
+
+    typer.echo("\nbar ranges:")
+    for inst in instruments:
+        # We don't know all bar_types for an instrument from Bar storage
+        # alone; rely on catalog.get_intervals' identifier API and try
+        # the canonical EXTERNAL-aggregation form for common bar specs.
+        for spec in ("1-MINUTE-LAST-EXTERNAL", "5-MINUTE-LAST-EXTERNAL",
+                     "1-HOUR-LAST-EXTERNAL", "1-DAY-LAST-EXTERNAL"):
+            ident = f"{inst.id}-{spec}"
+            intervals = catalog.get_intervals(Bar, ident)
+            if intervals:
+                start_ns, end_ns = intervals[0][0], intervals[-1][1]
+                typer.echo(
+                    f"  {ident}: "
+                    f"{dt.datetime.fromtimestamp(start_ns / 1e9, tz=dt.timezone.utc).isoformat()} "
+                    f".. "
+                    f"{dt.datetime.fromtimestamp(end_ns / 1e9, tz=dt.timezone.utc).isoformat()} "
+                    f"({len(intervals)} segments)"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -133,23 +298,6 @@ def live_run(
         task="Phase 1 Task 6 — live testnet runner",
         module="xtrade.node.factory + xtrade.strategies.base",
     )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _not_yet_implemented(*, task: str, module: str) -> None:
-    """Exit with code 2 and a clear pointer to the task that fills this in."""
-    msg = (
-        f"This command is not yet implemented.\n"
-        f"  Responsible task: {task}\n"
-        f"  Module(s):        {module}\n"
-        f"See docs/phase1_brief.md §5 for the full task list."
-    )
-    typer.echo(msg, err=True)
-    raise typer.Exit(code=2)
 
 
 def main() -> None:  # pragma: no cover - thin shim
