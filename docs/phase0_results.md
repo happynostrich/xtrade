@@ -389,22 +389,23 @@ Phase 1 may proceed in parallel with the C2/C3/C6b cleanup items.
 
 ## Phase 0 Final Status — Updated 2026-05-22
 
-This supersedes the 2026-05-21 status block above. C2-spot, C3, and C6b
-have all flipped to PASS since that snapshot.
+C2 (Futures) has flipped from SKIP to PASS following the Binance
+Futures-testnet → **Demo Trading** migration. All other rows unchanged
+from the prior 2026-05-22 snapshot.
 
 ### Per-check terminal state
 
-| ID      | Name                                                    | Status | Notes |
-|---------|---------------------------------------------------------|--------|-------|
-| C1      | Install + import + engine instantiation                 | PASS   | nautilus_trader 1.227.0, both adapters importable |
-| C2      | Binance USDT-M Futures testnet: data + order + cancel   | SKIP   | testnet.binancefuture.com unreachable; no Futures keys obtainable. Coverage achieved via C2-spot instead. |
-| C2-spot | Binance Spot testnet: data + order + cancel             | PASS   | Ed25519 keys, WS-API logon OK; limit BUY @ 0.7×bid (PERCENT_PRICE_BY_SIDE compliant) submitted, accepted, canceled. |
-| C3      | Hyperliquid testnet: data + order + cancel              | PASS   | Unified Account funded (999 USDC). Quotes received, BUY 0.001 BTC-USD-PERP @ 38872 accepted then canceled. |
-| C4a     | Enumerate Hyperliquid perp DEXes, locate trade.xyz dex  | PASS   | dex='xyz', 78 symbols, all 7 expected equity tickers present |
-| C4b     | trade.xyz mainnet read-only market data via Nautilus    | PASS   | Live quotes for `xyz:TSLA-USD-PERP` and `xyz:NVDA-USD-PERP` via HIP-3 product type |
-| C5      | Binance mainnet US-equity perp read-only                | INFO   | Binance does not list equity perps; architectural finding, not a defect |
-| C6a     | Fetch Binance historical klines                         | PASS   | 4321 BTCUSDT 1m rows |
-| C6b     | Minimal Nautilus EMA-cross backtest                     | PASS   | After matching CSV precision to instrument fixture (price 1dp, size 3dp): 376 orders filled, 188 positions opened across 4321 bars. |
+| ID      | Name                                                          | Status | Notes |
+|---------|---------------------------------------------------------------|--------|-------|
+| C1      | Install + import + engine instantiation                       | PASS   | nautilus_trader 1.227.0, both adapters importable |
+| C2      | Binance USDT-M Futures Demo Trading: data + order + cancel    | PASS   | Ed25519 key created at demo.binance.com → API Management; REST `demo-fapi.binance.com`, WS-API `testnet.binancefuture.com/ws-fapi/v1`, market WS `stream.binancefuture.com`. Limit BUY 0.002 BTC @ 0.5×bid accepted then canceled. Demo account auto-provisioned with 5000 USDT + 5000 USDC + 0.01 BTC. |
+| C2-spot | Binance Spot testnet: data + order + cancel                   | PASS   | Ed25519 keys, WS-API logon OK; limit BUY @ 0.7×bid (PERCENT_PRICE_BY_SIDE compliant) submitted, accepted, canceled. |
+| C3      | Hyperliquid testnet: data + order + cancel                    | PASS   | Unified Account funded (999 USDC). Quotes received, BUY 0.001 BTC-USD-PERP @ 38872 accepted then canceled. |
+| C4a     | Enumerate Hyperliquid perp DEXes, locate trade.xyz dex        | PASS   | dex='xyz', 78 symbols, all 7 expected equity tickers present |
+| C4b     | trade.xyz mainnet read-only market data via Nautilus          | PASS   | Live quotes for `xyz:TSLA-USD-PERP` and `xyz:NVDA-USD-PERP` via HIP-3 product type |
+| C5      | Binance mainnet US-equity perp read-only                      | INFO   | Binance does not list equity perps; architectural finding, not a defect |
+| C6a     | Fetch Binance historical klines                               | PASS   | 4321 BTCUSDT 1m rows |
+| C6b     | Minimal Nautilus EMA-cross backtest                           | PASS   | After matching CSV precision to instrument fixture (price 1dp, size 3dp): 376 orders filled, 188 positions opened across 4321 bars. |
 
 ### Engine selection
 
@@ -413,12 +414,14 @@ execution, and backtest paths.
 
 ### Adapter coverage
 
-- **Binance Spot (testnet)**: ✅ market data + live order submit/cancel via
-  WS Trading API (Ed25519 auth). Sufficient for end-to-end execution
-  validation in absence of Futures testnet.
-- **Binance USDT-M Futures**: ✅ market data (mainnet) and historical klines
-  (C6a). Live execution path on testnet remains untested only because
-  testnet.binancefuture.com keys cannot currently be issued.
+- **Binance Spot (testnet, `testnet.binance.vision`)**: ✅ market data +
+  live order submit/cancel via WS Trading API (Ed25519 auth).
+- **Binance USDT-M Futures (Demo Trading, `demo.binance.com`)**: ✅ full
+  end-to-end — REST + WS-API + market data + order submit/cancel.
+  Nautilus 1.227 internally migrated `BinanceEnvironment.TESTNET` for
+  USDT_FUTURES to the new merged REST endpoint `demo-fapi.binance.com`
+  while keeping WS market on the legacy `stream.binancefuture.com`
+  (which is what the venue note recommended).
 - **Hyperliquid (incl. HIP-3 / trade.xyz)**: ✅ market data on mainnet and
   testnet; live testnet execution validated end-to-end under Hyperliquid's
   **Unified Account** model.
@@ -433,28 +436,90 @@ execution, and backtest paths.
    to 1 decimal and volume to 3 decimals before constructing `Bar`
    objects, matching `TestInstrumentProvider.btcusdt_perp_binance()`
    (`price_precision=1`, `size_precision=3`). C6b now PASS.
-3. **Binance Futures testnet site unreachable** — accepted as a venue-side
-   limitation; Spot testnet (C2-spot) provides equivalent end-to-end
-   coverage of the adapter, including the WS Trading API path.
+3. **Binance Futures testnet (C2) was SKIP** — resolved by Binance's
+   migration of Futures testing into Demo Trading. The standalone
+   `testnet.binancefuture.com` user database was retired; Demo keys are
+   created at `demo.binance.com → API Management` against the main
+   Binance account. Nautilus 1.227's `BinanceEnvironment.TESTNET` for
+   USDT_FUTURES already maps to the new REST URL, so only the env-var
+   key/secret needed updating. Note: `BinanceEnvironment.DEMO` was tried
+   first but routes WS market data to `wss://demo-fstream.binance.com`,
+   which is unreachable from this network (DNS returns a non-Binance IP
+   block). Sticking with TESTNET mode for USDT_FUTURES is the correct
+   choice while the demo-fstream domain remains broken.
+4. **C2 order minimum notional** — Binance Demo USDT-M Futures enforces
+   MIN_NOTIONAL = 50 USDT (error `-4164`). The original 0.001 BTC @
+   50%-below-market yields ~$38 notional and is rejected. Quantity
+   bumped to 0.002 BTC; price still 50% below bid; order accepts and
+   cancels cleanly.
+5. **`node.trader.cache` AttributeError** — same Nautilus 1.227 attribute
+   relocation as the C2-spot script. Updated to `node.cache`.
 
 ### Open / deferred items
 
-- **C2 (Futures testnet)** remains SKIP until testnet.binancefuture.com
-  is reachable and keys can be issued. Not blocking for Phase 1 because
-  the same Binance adapter is exercised by C2-spot.
+- **`wss://demo-fstream.binance.com` unreachable** — venue-side or
+  DNS-routing problem outside this project. Workaround in place
+  (TESTNET env mode for USDT_FUTURES). Revisit when Binance fixes the
+  demo-fstream domain or when Nautilus offers a per-stream URL override
+  knob.
+- **Binance COIN-M Futures** — out of scope; per the migration COIN-M is
+  no longer supported in Demo Trading. xtrade does not target COIN-M.
 - **Binance has no equity perps** — confirmed; trade.xyz (HIP-3 on
   Hyperliquid) is the sole equity-perp venue in the architecture.
 
 ### Go / No-Go conclusion
 
-**GO** — unchanged. All six acceptance checks have a passing or
-satisfactorily-explained outcome:
+**GO** — strengthened. With C2 (Futures) now PASS, **all** four
+PASS-required behaviors (install, market data, order submit, order
+cancel) are demonstrated on **both** Binance verticals (Spot + Futures
+Demo) and Hyperliquid testnet. No SKIPs remain on PASS-required checks.
 
-- All four PASS-required behaviors (install, market data, order submit,
-  order cancel) are independently demonstrated on both venues.
-- The single remaining SKIP (C2 Futures) is venue-availability bound, not
-  adapter- or code-bound, and is fully substituted by C2-spot.
-- The backtest engine runs an end-to-end EMA-cross strategy on real
-  Binance klines, fills orders, and reports positions.
+Phase 1 proceeds per `docs/phase1_brief.md`.
 
-Phase 1 may proceed.
+### C2 — Binance USDT-M Futures Demo Trading connectivity
+
+- **Status**: `FAIL`
+- **Recorded**: 2026-05-22 06:10:52Z
+- **Notes**:
+    - TimeoutError: 
+
+### C2 — Binance USDT-M Futures Demo Trading connectivity
+
+- **Status**: `FAIL`
+- **Recorded**: 2026-05-22 06:12:59Z
+- **Notes**:
+    - AttributeError: 'Trader' object has no attribute 'cache'
+
+### C2 — Binance USDT-M Futures Demo Trading connectivity
+
+- **Status**: `PASS`
+- **Recorded**: 2026-05-22 06:14:21Z
+- **Notes**:
+    - account balances: 8 entries
+    -   FDUSD: total=0.00000000 FDUSD free=0.00000000 FDUSD
+    -   U: total=0.00000000 U free=0.00000000 U
+    -   BNB: total=0.00000000 BNB free=0.00000000 BNB
+    -   ETH: total=0.00000000 ETH free=0.00000000 ETH
+    -   BTC: total=0.01000000 BTC free=0.01000000 BTC
+    - subscribed quotes/trades
+    - first quote: bid=77447.50 ask=77448.60
+    - submitted limit BUY 0.0020 @ 38723.80
+    - order accepted: O-20260522-061409-001-000-1
+    - order canceled: O-20260522-061409-001-000-1
+
+### C2 — Binance USDT-M Futures Demo Trading connectivity
+
+- **Status**: `PASS`
+- **Recorded**: 2026-05-22 06:15:01Z
+- **Notes**:
+    - account balances: 8 entries
+    -   FDUSD: total=0.00000000 FDUSD free=0.00000000 FDUSD
+    -   U: total=0.00000000 U free=0.00000000 U
+    -   BNB: total=0.00000000 BNB free=0.00000000 BNB
+    -   ETH: total=0.00000000 ETH free=0.00000000 ETH
+    -   BTC: total=0.01000000 BTC free=0.01000000 BTC
+    - subscribed quotes/trades
+    - first quote: bid=77450.00 ask=77452.00
+    - submitted limit BUY 0.0020 @ 38725.00
+    - order accepted: O-20260522-061450-001-000-1
+    - order canceled: O-20260522-061450-001-000-1

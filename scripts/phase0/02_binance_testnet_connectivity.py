@@ -1,22 +1,39 @@
-"""Task B — C2: Binance Testnet connectivity (USDT-M Futures focus).
+"""Task B — C2: Binance USDT-M Futures Demo Trading connectivity.
 
-Validates four behaviors against Binance USDT-M Futures testnet using
-NautilusTrader's Binance adapter:
+Validates four behaviors against Binance USDT-M Futures **Demo Trading**
+using NautilusTrader's Binance adapter:
 
   1. Account info (balance) retrieval.
   2. Market data subscription for a perpetual (default: `BTCUSDT-PERP`).
   3. Place a limit order **far from market** so it never fills.
   4. Cancel that order.
 
-All actions target the **testnet**. The script refuses to run against
-mainnet (Phase 0 safety rule).
+All actions target the **Demo** environment (`demo.binance.com`). The
+script refuses to run against mainnet (Phase 0 safety rule).
 
 This script uses a short-running `TradingNode`. It exits PASS if all
 four behaviors complete within a timeout; otherwise FAIL with the
 exception captured in `docs/phase0_results.md`.
 
-NOTE: Binance Spot testnet is intentionally NOT exercised here because
-Phase 0's main interest is perpetuals; coverage can be added later.
+Venue migration note (2026):
+  Binance retired the standalone `testnet.binancefuture.com` user
+  database and merged Futures testing into **Demo Trading** under the
+  main Binance account at `https://demo.binance.com`. The REST endpoint
+  is now `https://demo-fapi.binance.com`; market-data WS is
+  `wss://demo-fstream.binance.com`. NautilusTrader 1.227+ exposes
+  `BinanceEnvironment.DEMO` which auto-routes both. We use it here.
+
+  Implications:
+    - API keys must be created at `demo.binance.com` -> API Management
+      (NOT the old testnet.binancefuture.com).
+    - COIN-M is unsupported in Demo (we only need USDT-M anyway).
+    - The `.env` variable names BINANCE_FUTURES_TESTNET_API_KEY/SECRET
+      are retained for backwards compatibility; semantically they now
+      carry Demo Trading credentials.
+
+NOTE: Binance Spot is exercised by `02b_binance_spot_testnet_connectivity.py`
+against `testnet.binance.vision` (Spot keeps a separate testnet under
+GitHub login; it was NOT migrated to Demo).
 """
 
 from __future__ import annotations
@@ -35,7 +52,7 @@ from xtrade.config import load_binance_testnet, MissingCredentialError  # noqa: 
 
 
 CHECK_ID = "C2"
-CHECK_NAME = "Binance testnet connectivity (USDT-M Futures)"
+CHECK_NAME = "Binance USDT-M Futures Demo Trading connectivity"
 
 # Symbol used by Nautilus for the BTC-USDT perpetual on Binance USDT-M Futures.
 DEFAULT_PERP_SYMBOL = "BTCUSDT-PERP"
@@ -49,9 +66,12 @@ async def _run() -> list[str]:
     creds = load_binance_testnet()
     if not creds.has_futures:
         raise MissingCredentialError(
-            "Binance USDT-M Futures testnet API key/secret not set in `.env`. "
-            "Please add BINANCE_FUTURES_TESTNET_API_KEY/SECRET (or the shared "
-            "BINANCE_TESTNET_API_KEY/SECRET)."
+            "Binance USDT-M Futures Demo Trading API key/secret not set in "
+            "`.env`. Create a key at https://demo.binance.com/ -> API "
+            "Management (NOT testnet.binancefuture.com, which has been "
+            "merged into Demo Trading). Set "
+            "BINANCE_FUTURES_TESTNET_API_KEY/SECRET (or the shared "
+            "BINANCE_TESTNET_API_KEY/SECRET) in `.env`."
         )
 
     # Imports are local to avoid pulling Nautilus into Task A when only
@@ -134,7 +154,10 @@ async def _run() -> list[str]:
             # Far-from-market: 50% below current bid, well outside any reasonable spread.
             target = Decimal(str(ref_price)) * Decimal("0.5")
             price = instr.make_price(target)
-            qty: Quantity = instr.make_qty(Decimal("0.001"))
+            # Quantity sized so notional (price * qty) clears Binance USDT-M
+            # Futures Demo's MIN_NOTIONAL = 50 USDT (-4164) even when price is
+            # 50% below market. 0.002 BTC * 0.5 * 70000 = ~70 USDT, safe.
+            qty: Quantity = instr.make_qty(Decimal("0.002"))
             order = self.order_factory.limit(
                 instrument_id=self.config.instrument_id,
                 order_side=OrderSide.BUY,
@@ -168,6 +191,16 @@ async def _run() -> list[str]:
 
     # --- Trading node config -------------------------------------------------
     instr_provider = InstrumentProviderConfig(load_all=True)
+    # Use `BinanceEnvironment.TESTNET` (not DEMO) intentionally. For USDT_FUTURES
+    # Nautilus 1.227 already migrated TESTNET internally to the post-merger URLs:
+    #   REST   -> https://demo-fapi.binance.com         (== new Demo Trading REST)
+    #   WS-API -> wss://testnet.binancefuture.com/ws-fapi/v1
+    #   WS mkt -> wss://stream.binancefuture.com        (legacy domain, still active)
+    # DEMO mode would route WS mkt to wss://demo-fstream.binance.com, which we've
+    # observed to be unreachable from this network (DNS returns a non-Binance IP
+    # block, "No route to host"). The legacy stream.binancefuture.com remains
+    # operational per the venue note, and TESTNET mode targets it.
+    # See nautilus_trader/adapters/binance/common/urls.py for the full table.
     data_cfg = BinanceDataClientConfig(
         api_key=creds.futures_api_key,
         api_secret=creds.futures_api_secret,
@@ -206,7 +239,7 @@ async def _run() -> list[str]:
         await run_node_until(node, strategy._done, timeout_s=DEFAULT_TIMEOUT_S + 30)
 
         # Verify balance after order activity to also exercise account snapshot.
-        account = node.trader.cache.account_for_venue(venue)
+        account = node.cache.account_for_venue(venue)
         if account is not None:
             balances = list(account.balances().values())
             notes.append(f"account balances: {len(balances)} entries")
