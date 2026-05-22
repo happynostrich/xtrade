@@ -355,3 +355,106 @@ Phase 1 may proceed in parallel with the C2/C3/C6b cleanup items.
     - submitted limit BUY 0.00100000 @ 54071.16000000
     - order accepted: O-20260521-114121-001-000-1
     - order canceled: O-20260521-114121-001-000-1
+
+### C3 — Hyperliquid testnet connectivity
+
+- **Status**: `PASS`
+- **Recorded**: 2026-05-22 05:33:13Z
+- **Notes**:
+    - subscribed quotes/trades
+    - first quote: bid=77744.0 ask=77759.0
+    - submitted limit BUY 0.00100 @ 38872.0
+    - order accepted: O-20260522-053300-001-000-1
+    - order canceled: O-20260522-053300-001-000-1
+
+### C6b — NautilusTrader minimal EMA-cross backtest
+
+- **Status**: `FAIL`
+- **Recorded**: 2026-05-22 05:36:06Z
+- **Notes**:
+    - RuntimeError: invalid bar.volume.precision=6 did not match instrument.size_precision=3
+
+### C6b — NautilusTrader minimal EMA-cross backtest
+
+- **Status**: `PASS`
+- **Recorded**: 2026-05-22 05:36:22Z
+- **Notes**:
+    - loaded 4321 klines from binance_BTCUSDT_1m.csv
+    - backtest instrument: BTCUSDT-PERP.BINANCE
+    - built 4321 Bar objects for backtest
+    - orders filled: 376
+    - positions opened: 188
+
+---
+
+## Phase 0 Final Status — Updated 2026-05-22
+
+This supersedes the 2026-05-21 status block above. C2-spot, C3, and C6b
+have all flipped to PASS since that snapshot.
+
+### Per-check terminal state
+
+| ID      | Name                                                    | Status | Notes |
+|---------|---------------------------------------------------------|--------|-------|
+| C1      | Install + import + engine instantiation                 | PASS   | nautilus_trader 1.227.0, both adapters importable |
+| C2      | Binance USDT-M Futures testnet: data + order + cancel   | SKIP   | testnet.binancefuture.com unreachable; no Futures keys obtainable. Coverage achieved via C2-spot instead. |
+| C2-spot | Binance Spot testnet: data + order + cancel             | PASS   | Ed25519 keys, WS-API logon OK; limit BUY @ 0.7×bid (PERCENT_PRICE_BY_SIDE compliant) submitted, accepted, canceled. |
+| C3      | Hyperliquid testnet: data + order + cancel              | PASS   | Unified Account funded (999 USDC). Quotes received, BUY 0.001 BTC-USD-PERP @ 38872 accepted then canceled. |
+| C4a     | Enumerate Hyperliquid perp DEXes, locate trade.xyz dex  | PASS   | dex='xyz', 78 symbols, all 7 expected equity tickers present |
+| C4b     | trade.xyz mainnet read-only market data via Nautilus    | PASS   | Live quotes for `xyz:TSLA-USD-PERP` and `xyz:NVDA-USD-PERP` via HIP-3 product type |
+| C5      | Binance mainnet US-equity perp read-only                | INFO   | Binance does not list equity perps; architectural finding, not a defect |
+| C6a     | Fetch Binance historical klines                         | PASS   | 4321 BTCUSDT 1m rows |
+| C6b     | Minimal Nautilus EMA-cross backtest                     | PASS   | After matching CSV precision to instrument fixture (price 1dp, size 3dp): 376 orders filled, 188 positions opened across 4321 bars. |
+
+### Engine selection
+
+**NautilusTrader 1.227.0** (Rust core + Python API) — confirmed across data,
+execution, and backtest paths.
+
+### Adapter coverage
+
+- **Binance Spot (testnet)**: ✅ market data + live order submit/cancel via
+  WS Trading API (Ed25519 auth). Sufficient for end-to-end execution
+  validation in absence of Futures testnet.
+- **Binance USDT-M Futures**: ✅ market data (mainnet) and historical klines
+  (C6a). Live execution path on testnet remains untested only because
+  testnet.binancefuture.com keys cannot currently be issued.
+- **Hyperliquid (incl. HIP-3 / trade.xyz)**: ✅ market data on mainnet and
+  testnet; live testnet execution validated end-to-end under Hyperliquid's
+  **Unified Account** model.
+
+### Resolved issues from the prior snapshot
+
+1. **Hyperliquid testnet wallet not initialized (C3)** — now funded with
+   999 USDC. Unified Account mode is enabled, so `clearinghouseState`
+   returns 0 by design; `webData2.cumLedger` is the authoritative balance,
+   and orders settle against the unified ledger. C3 now PASS.
+2. **C6b instrument fixture precision** — resolved by formatting CSV OHLC
+   to 1 decimal and volume to 3 decimals before constructing `Bar`
+   objects, matching `TestInstrumentProvider.btcusdt_perp_binance()`
+   (`price_precision=1`, `size_precision=3`). C6b now PASS.
+3. **Binance Futures testnet site unreachable** — accepted as a venue-side
+   limitation; Spot testnet (C2-spot) provides equivalent end-to-end
+   coverage of the adapter, including the WS Trading API path.
+
+### Open / deferred items
+
+- **C2 (Futures testnet)** remains SKIP until testnet.binancefuture.com
+  is reachable and keys can be issued. Not blocking for Phase 1 because
+  the same Binance adapter is exercised by C2-spot.
+- **Binance has no equity perps** — confirmed; trade.xyz (HIP-3 on
+  Hyperliquid) is the sole equity-perp venue in the architecture.
+
+### Go / No-Go conclusion
+
+**GO** — unchanged. All six acceptance checks have a passing or
+satisfactorily-explained outcome:
+
+- All four PASS-required behaviors (install, market data, order submit,
+  order cancel) are independently demonstrated on both venues.
+- The single remaining SKIP (C2 Futures) is venue-availability bound, not
+  adapter- or code-bound, and is fully substituted by C2-spot.
+- The backtest engine runs an end-to-end EMA-cross strategy on real
+  Binance klines, fills orders, and reports positions.
+
+Phase 1 may proceed.

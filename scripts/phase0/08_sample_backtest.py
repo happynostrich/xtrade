@@ -85,11 +85,14 @@ def main() -> int:
             bars.append(
                 Bar(
                     bar_type=bar_type,
-                    open=Price.from_str(f"{row.open:.2f}"),
-                    high=Price.from_str(f"{row.high:.2f}"),
-                    low=Price.from_str(f"{row.low:.2f}"),
-                    close=Price.from_str(f"{row.close:.2f}"),
-                    volume=Quantity.from_str(f"{row.volume:.6f}"),
+                    # BTCUSDT-PERP has tickSize=0.10 (price_precision=1);
+                    # match the test instrument and the live venue.
+                    open=Price.from_str(f"{row.open:.1f}"),
+                    high=Price.from_str(f"{row.high:.1f}"),
+                    low=Price.from_str(f"{row.low:.1f}"),
+                    close=Price.from_str(f"{row.close:.1f}"),
+                    # BTCUSDT lotSize=0.001 → size_precision=3.
+                    volume=Quantity.from_str(f"{row.volume:.3f}"),
                     ts_event=ts_ns,
                     ts_init=close_ns,
                 )
