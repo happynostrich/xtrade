@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Phase 1 Task 6 verification script — live testnet order probe.
 
-A thin wrapper around `xtrade live run` that loads
-`config/venues.testnet.yaml`, places one far-from-market limit order
-on the requested instrument, waits for accept + cancel, and prints a
-one-line PASS / FAIL.
+A thin wrapper around `xtrade.live.runner.run_live` that loads a
+per-venue testnet yaml (Phase 3.5+ layout — see
+`config/venues.*.testnet.yaml`), places one far-from-market limit
+order on the requested instrument, waits for accept + cancel, and
+prints a one-line PASS / FAIL.
 
 Exit codes mirror the CLI contract (P7):
   0  PASS — order accepted and canceled within the timeout
@@ -21,7 +22,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_YAML = REPO_ROOT / "config" / "venues.testnet.yaml"
 
 
 def main() -> int:
@@ -44,8 +44,13 @@ def main() -> int:
     parser.add_argument(
         "--venues-yaml",
         type=Path,
-        default=DEFAULT_YAML,
-        help=f"Path to venues yaml (default: {DEFAULT_YAML}).",
+        required=True,
+        help=(
+            "Path to a per-venue testnet yaml (e.g. "
+            "config/venues.binance_futures.testnet.yaml). The aggregated "
+            "config/venues.testnet.yaml pointer is intentionally empty as "
+            "of Phase 3.5 and cannot be loaded directly."
+        ),
     )
     parser.add_argument("--run-id", default=None, help="Override the auto run id.")
     args = parser.parse_args()

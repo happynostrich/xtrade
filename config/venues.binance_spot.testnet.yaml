@@ -1,0 +1,18 @@
+# xtrade — Binance SPOT testnet credentials (Phase 3.5+).
+#
+# Split out from the original `venues.testnet.yaml` because Nautilus's
+# ExecutionEngine registers both Binance subaccounts under the same
+# `Venue('BINANCE')`, so spot and futures cannot share one TradingNode.
+# Each subaccount now lives in its own yaml; `xtrade live health` (and
+# the runbook scripts) iterate through them sequentially.
+#
+# References env-var NAMES only. Literal secrets must NEVER appear here.
+
+binance:
+  environment: TESTNET
+
+  spot:
+    api_key_env: BINANCE_SPOT_TESTNET_API_KEY
+    api_secret_env: BINANCE_SPOT_TESTNET_API_SECRET
+    key_type: ED25519
+    account_type: SPOT

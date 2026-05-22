@@ -145,15 +145,36 @@ def test_load_venues_hyperliquid_only_optional_vault(
     assert cfg.hyperliquid.unified_account is True  # default
 
 
-def test_repo_shipped_yaml_loads_with_full_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The `config/venues.testnet.yaml` we ship must parse cleanly when all
+def test_repo_pointer_yaml_is_empty_stub() -> None:
+    """As of Phase 3.5 the aggregated `config/venues.testnet.yaml` is
+    intentionally gutted to a comment-only pointer — operators must pass
+    one of the per-venue siblings instead. `load_venues` rejects the
+    empty pointer with `ConfigError`."""
+    repo_yaml = Path(__file__).resolve().parents[1] / "config" / "venues.testnet.yaml"
+    with pytest.raises(ConfigError):
+        load_venues(repo_yaml)
+
+
+def test_repo_per_venue_yamls_load_with_full_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each shipped per-venue testnet yaml must parse cleanly when its
     referenced env vars are set."""
     _set_all_env(monkeypatch)
-    repo_yaml = Path(__file__).resolve().parents[1] / "config" / "venues.testnet.yaml"
-    cfg = load_venues(repo_yaml)
-    assert cfg.binance is not None and cfg.binance.has_spot and cfg.binance.has_futures
-    assert cfg.hyperliquid is not None
-    assert cfg.hyperliquid.trading_dex == "xyz"
+    config_dir = Path(__file__).resolve().parents[1] / "config"
+
+    spot_cfg = load_venues(config_dir / "venues.binance_spot.testnet.yaml")
+    assert spot_cfg.binance is not None
+    assert spot_cfg.binance.has_spot and not spot_cfg.binance.has_futures
+    assert spot_cfg.hyperliquid is None
+
+    futures_cfg = load_venues(config_dir / "venues.binance_futures.testnet.yaml")
+    assert futures_cfg.binance is not None
+    assert futures_cfg.binance.has_futures and not futures_cfg.binance.has_spot
+    assert futures_cfg.hyperliquid is None
+
+    hl_cfg = load_venues(config_dir / "venues.hyperliquid.testnet.yaml")
+    assert hl_cfg.binance is None
+    assert hl_cfg.hyperliquid is not None
+    assert hl_cfg.hyperliquid.trading_dex == "xyz"
 
 
 # ---------------------------------------------------------------------------

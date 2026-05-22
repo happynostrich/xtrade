@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Phase 1 Task 3 verification script — TradingNode health probe.
 
-A thin wrapper around `xtrade live health` that loads
-`config/venues.testnet.yaml`, picks the canonical testnet instruments per
-venue (matching Phase 0 scripts 02b / 03), and prints a one-line PASS / FAIL.
+A thin wrapper around `xtrade.node.health.probe` that loads a per-venue
+testnet yaml (Phase 3.5+ layout — see `config/venues.*.testnet.yaml`),
+picks the canonical testnet instrument for that venue, and prints a
+one-line PASS / FAIL. One invocation drives one venue's TradingNode;
+to sweep all three, prefer `xtrade live health` (which chains the
+probes sequentially in-process).
 
 Exit codes mirror the CLI contract (P7):
   0  PASS — every probed channel observed a quote within the timeout
@@ -18,7 +21,6 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_YAML = REPO_ROOT / "config" / "venues.testnet.yaml"
 
 _DEFAULT_INSTRUMENTS = {
     "binance_spot": "BTCUSDT.BINANCE",
@@ -32,7 +34,10 @@ def main() -> int:
     parser.add_argument(
         "--venues",
         default="binance_spot,binance_futures,hyperliquid",
-        help="Comma-separated venue keys to probe.",
+        help=(
+            "Comma-separated venue keys to probe. Only keys actually "
+            "populated in the supplied --venues-yaml are exercised."
+        ),
     )
     parser.add_argument(
         "--timeout", type=int, default=60, help="Per-channel quote timeout (seconds)."
@@ -40,8 +45,13 @@ def main() -> int:
     parser.add_argument(
         "--venues-yaml",
         type=Path,
-        default=DEFAULT_YAML,
-        help=f"Path to venues yaml (default: {DEFAULT_YAML}).",
+        required=True,
+        help=(
+            "Path to a per-venue testnet yaml (e.g. "
+            "config/venues.binance_futures.testnet.yaml). The aggregated "
+            "config/venues.testnet.yaml pointer is intentionally empty as "
+            "of Phase 3.5 and cannot be loaded directly."
+        ),
     )
     parser.add_argument("--run-id", default=None, help="Override the auto run id.")
     args = parser.parse_args()

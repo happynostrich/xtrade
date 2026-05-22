@@ -311,6 +311,50 @@ def test_narrow_venues_cfg_drops_binance_entirely_for_hyperliquid_only() -> None
     assert narrowed.hyperliquid is not None
 
 
+def test_resolve_per_venue_yaml_returns_sibling_when_present(tmp_path: Path) -> None:
+    """The convention `venues.<venue_key>.testnet.yaml` next to the
+    given base path is what the CLI uses to auto-discover per-venue
+    files in chained `xtrade live health` runs."""
+    from xtrade.cli import _resolve_per_venue_yaml
+
+    base = tmp_path / "venues.testnet.yaml"
+    base.write_text("# pointer\n")
+    sibling = tmp_path / "venues.binance_futures.testnet.yaml"
+    sibling.write_text("binance:\n  environment: TESTNET\n")
+
+    resolved = _resolve_per_venue_yaml("binance_futures", base)
+    assert resolved == sibling
+
+
+def test_resolve_per_venue_yaml_returns_none_when_missing(tmp_path: Path) -> None:
+    from xtrade.cli import _resolve_per_venue_yaml
+
+    base = tmp_path / "venues.testnet.yaml"
+    base.write_text("# pointer\n")
+    # No sibling created — the CLI's caller will fall back to the
+    # explicit `--venues-yaml` path in this case.
+    assert _resolve_per_venue_yaml("hyperliquid", base) is None
+
+
+def test_live_health_rejects_instrument_outside_requested_venues(tmp_path: Path) -> None:
+    """If the operator passes --venues binance_futures but --instrument
+    BTCUSDT.BINANCE (a spot id), we fail loudly instead of silently
+    dropping the instrument."""
+    result = runner.invoke(
+        app,
+        [
+            "live", "health",
+            "--venues", "binance_futures",
+            "--instrument", "BTCUSDT.BINANCE",
+            "--timeout", "5",
+            "--venues-yaml", str(tmp_path / "nope.yaml"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "binance_spot" in result.stderr
+    assert "binance_futures" in result.stderr
+
+
 def test_narrow_venues_cfg_rejects_missing_venue() -> None:
     """If the operator asks for a key not in the yaml we exit 2 with a
     clear message instead of silently dropping it."""

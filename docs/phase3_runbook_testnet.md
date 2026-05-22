@@ -21,10 +21,22 @@ here.
 
 ## 0. Prerequisites
 
-1. A populated `config/venues.testnet.yaml` with at least one venue
-   (default: `binance` USDT-M futures testnet) and `testnet: true`.
-2. `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_API_SECRET` (or
-   whichever env vars the yaml references) exported in the shell.
+1. Per-venue testnet yamls under `config/` (Phase 3.5+ layout — each
+   subaccount lives in its own file to dodge Nautilus's per-process
+   `Venue('BINANCE')` collision between spot and futures):
+   - `config/venues.binance_spot.testnet.yaml`
+   - `config/venues.binance_futures.testnet.yaml`
+   - `config/venues.hyperliquid.testnet.yaml`
+
+   The pointer file `config/venues.testnet.yaml` is intentionally
+   gutted to a comment-only stub and must **not** be passed via
+   `--venues-yaml` directly; it exists only so `xtrade live health`
+   (with no `--venues-yaml`) can auto-discover the per-venue siblings.
+2. Whatever env vars the per-venue yamls reference, exported in the
+   shell. For the default layout that's
+   `BINANCE_SPOT_TESTNET_API_KEY` / `..._API_SECRET`,
+   `BINANCE_FUTURES_TESTNET_API_KEY` / `..._API_SECRET`, and the
+   `HYPERLIQUID_TESTNET_*` trio.
 3. A small balance on the testnet sub-account that owns the API key.
    The default `safety_multiplier=0.7` places a BUY at 30 % below the
    bid, so the order parks rather than fills, but the venue still
@@ -33,13 +45,20 @@ here.
    `src/xtrade/risk/rules.py` for the schema.
 
 ```bash
-export BINANCE_TESTNET_API_KEY=...
-export BINANCE_TESTNET_API_SECRET=...
-xtrade live healthcheck --instrument BTCUSDT-PERP.BINANCE
+export BINANCE_FUTURES_TESTNET_API_KEY=...
+export BINANCE_FUTURES_TESTNET_API_SECRET=...
+# Single-venue probe — pass the per-venue yaml explicitly:
+xtrade live health \
+  --instrument BTCUSDT-PERP.BINANCE \
+  --venues-yaml config/venues.binance_futures.testnet.yaml
+# Or sweep all three venues sequentially (auto-discovers siblings):
+xtrade live health
 ```
 
-`live healthcheck` is the cheapest way to confirm credentials + network
-before spending a signal.
+`live health` is the cheapest way to confirm credentials + network
+before spending a signal. With no `--instrument`, it iterates each
+configured venue in its own `TradingNode` (sequential, because two
+nodes in one process would re-trigger the Binance Venue collision).
 
 ---
 
@@ -142,7 +161,7 @@ xtrade live signal-run \
   --instrument BTCUSDT-PERP.BINANCE \
   --signals-from data/signals \
   --mode manual \
-  --venues-yaml config/venues.testnet.yaml \
+  --venues-yaml config/venues.binance_futures.testnet.yaml \
   --safety-multiplier 0.7 \
   --venue-timeout 60 \
   --approval-timeout 600
@@ -216,7 +235,9 @@ failure mode is the signal.
 | symptom | likely cause | fix |
 | --- | --- | --- |
 | `error: --venues-yaml ... refused (mainnet)` | yaml has `testnet: false` | flip to `testnet: true`, or use the supplied testnet yaml |
-| `error: missing env var BINANCE_TESTNET_API_KEY` | shell didn't export creds | `export ...` and re-run |
+| `ConfigError: venues.testnet.yaml has no venues` | passed the gutted pointer file directly | pass one of the per-venue siblings (`venues.binance_futures.testnet.yaml`, etc.) or omit `--venues-yaml` so `live health` auto-discovers |
+| `Execution client for venue Venue('BINANCE') already registered` | tried to load spot + futures into the same `TradingNode` | use the per-venue yaml split — one node per subaccount, sequentially |
+| `error: missing env var BINANCE_*_TESTNET_API_KEY` | shell didn't export creds | `export ...` and re-run |
 | `error: no signals match instrument ...` | no matching signal in queue, or instrument mismatch | re-run scan, or fix `--instrument` to match `signal.symbol` |
 | `error: strategy 'momentum_follow' emitted no intents` | account snapshot missing mark (signal has no `metadata.last_price`) | re-emit signal with `metadata.last_price` set, or use a strategy that doesn't need a mark |
 | `live signal-run FAILED: intent blocked by RiskGate: ...` | risk rule cap too tight | adjust `--risk-config` |

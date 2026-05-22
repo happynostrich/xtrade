@@ -1,0 +1,17 @@
+# xtrade — Hyperliquid testnet credentials (Phase 3.5+).
+#
+# Pulled out of the original `venues.testnet.yaml` so `xtrade live
+# health` can iterate one TradingNode per venue without hitting the
+# per-process Venue collision between Binance subaccounts.
+#
+# References env-var NAMES only. Literal secrets must NEVER appear here.
+
+hyperliquid:
+  environment: TESTNET
+  account_address_env: HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS
+  api_wallet_key_env: HYPERLIQUID_TESTNET_API_WALLET_KEY
+  vault_address_env: HYPERLIQUID_TESTNET_VAULT_ADDRESS  # optional; unset = no vault
+  unified_account: true
+  # HIP-3 trading DEX for trade.xyz-style perp markets. Used by Task 4
+  # ingest (`xtrade data ingest --venue hyperliquid --symbol xyz:TSLA`).
+  trading_dex: xyz

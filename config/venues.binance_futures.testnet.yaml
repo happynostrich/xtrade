@@ -1,0 +1,20 @@
+# xtrade — Binance USDT-M futures testnet credentials (Phase 3.5+).
+#
+# See `venues.binance_spot.testnet.yaml` for the rationale behind the
+# per-subaccount split. For USDT-M Futures after the 2026 Demo Trading
+# migration: keep `TESTNET` — Nautilus 1.227 routes TESTNET to the new
+# `demo-fapi.binance.com` REST automatically while still using the
+# reachable `stream.binancefuture.com` WS market URL. `DEMO` routes WS
+# market to `demo-fstream.binance.com` which is currently unreachable
+# (see docs/phase0_results.md "open items").
+#
+# References env-var NAMES only. Literal secrets must NEVER appear here.
+
+binance:
+  environment: TESTNET
+
+  futures:
+    api_key_env: BINANCE_FUTURES_TESTNET_API_KEY
+    api_secret_env: BINANCE_FUTURES_TESTNET_API_SECRET
+    key_type: ED25519
+    account_type: USDT_FUTURE

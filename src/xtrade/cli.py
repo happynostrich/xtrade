@@ -384,6 +384,20 @@ def _venue_for_instrument(iid_str: str) -> str:
     )
 
 
+def _resolve_per_venue_yaml(venue_key: str, base_yaml: Path) -> Path | None:
+    """Return the sibling per-venue yaml for `venue_key`, or None if it
+    doesn't exist.
+
+    Convention: `venues.<venue_key>.testnet.yaml` lives next to the
+    `--venues-yaml` path (which on the default invocation is
+    `config/venues.testnet.yaml`). This lets `xtrade live health`
+    chain one TradingNode per venue from the same config directory
+    without forcing the operator to pass `--venues-yaml` three times.
+    """
+    candidate = base_yaml.parent / f"venues.{venue_key}.testnet.yaml"
+    return candidate if candidate.exists() else None
+
+
 def _narrow_venues_cfg(cfg, venue_keys: list[str]):
     """Return a new VenuesConfig containing only the requested venue keys.
 
@@ -499,53 +513,112 @@ def live_health(
             f"Valid: {sorted(_DEFAULT_HEALTH_INSTRUMENTS)}."
         )
 
+    # Group requested instruments by their inferred venue. If --instrument
+    # was not given, use the per-venue defaults. Anything that doesn't
+    # map to one of the venues we're iterating is an error — operator
+    # likely passed an instrument that doesn't match --venues.
     if instruments:
         iid_strs = [s.strip() for s in instruments.split(",") if s.strip()]
     else:
         iid_strs = [_DEFAULT_HEALTH_INSTRUMENTS[v] for v in venue_keys]
 
-    try:
-        iids = [InstrumentId.from_str(s) for s in iid_strs]
-    except Exception as exc:  # noqa: BLE001
-        raise _exit_config_error(f"failed to parse instrument id: {exc}") from exc
-
-    try:
-        venues_cfg = load_venues(venues_yaml)
-    except (ConfigError, MissingCredentialError) as exc:
-        raise _exit_config_error(str(exc)) from exc
-
-    # Narrow the loaded VenuesConfig to just the venues we're probing.
-    # Without this, a yaml that populates both binance.spot and
-    # binance.futures trips the factory's spot+futures coexistence guard
-    # even when the operator only asked for one of them.
-    venues_cfg = _narrow_venues_cfg(venues_cfg, venue_keys)
-
-    try:
-        with run_with_logging(
-            mode="health", run_id=run_id, venues_cfg=venues_cfg
-        ) as ctx:
-            result = probe(
-                venues_cfg,
-                instruments=iids,
-                timeout_s=float(timeout),
-                run_id=ctx.run_id,
-                logs_root=ctx.logs_root,
+    instruments_by_venue: dict[str, list[str]] = {v: [] for v in venue_keys}
+    for s in iid_strs:
+        try:
+            v = _venue_for_instrument(s)
+        except typer.BadParameter as exc:
+            raise _exit_config_error(str(exc)) from exc
+        if v not in instruments_by_venue:
+            raise _exit_config_error(
+                f"instrument {s!r} maps to venue {v!r} but --venues only "
+                f"requested {venue_keys}; add the venue or remove the instrument."
             )
-    except (MainnetRefusedError, VenueConfigError) as exc:
-        raise _exit_config_error(str(exc)) from exc
+        instruments_by_venue[v].append(s)
 
-    typer.echo(f"run_id:       {result.run_id}")
-    typer.echo(f"summary:      {result.summary_path}")
-    for iid_str, entry in result.summary["per_instrument"].items():
-        if entry["first_quote_iso"] is None:
-            typer.echo(f"  {iid_str}: NO QUOTE within {timeout}s")
-        else:
+    # Now iterate one TradingNode per venue. Each gets its own yaml
+    # (per-venue file next to --venues-yaml, or the explicit --venues-yaml
+    # for ad-hoc single-venue setups), its own run_id, and its own log
+    # dir. Sequential, not parallel — running two Binance nodes in
+    # parallel re-introduces the spot+futures Venue collision at the
+    # process level.
+    overall_pass = True
+    per_venue_outputs: list = []
+
+    for venue_key in venue_keys:
+        venue_iids_str = instruments_by_venue[venue_key]
+        if not venue_iids_str:
+            # Possible only if --instrument was given with no entries for
+            # this venue. Skip with a warning rather than failing.
             typer.echo(
-                f"  {iid_str}: first_quote={entry['first_quote_iso']} "
-                f"(+{entry['first_quote_latency_ms']} ms)"
+                f"note: no instruments specified for venue {venue_key!r}; skipping.",
+                err=True,
             )
+            continue
 
-    if not result.passed:
+        per_venue_yaml = _resolve_per_venue_yaml(venue_key, venues_yaml)
+        yaml_for_venue = per_venue_yaml if per_venue_yaml is not None else venues_yaml
+        try:
+            venues_cfg = load_venues(yaml_for_venue)
+        except (ConfigError, MissingCredentialError) as exc:
+            raise _exit_config_error(
+                f"venue {venue_key!r}: {exc}"
+            ) from exc
+
+        # If we loaded the explicit (non-split) yaml, narrow to just
+        # this venue so the factory guard doesn't trip on coexisting
+        # subaccounts. If we loaded the per-venue file, the narrow is
+        # a no-op but still validates the file contains what we expect.
+        venues_cfg = _narrow_venues_cfg(venues_cfg, [venue_key])
+
+        try:
+            venue_iids = [InstrumentId.from_str(s) for s in venue_iids_str]
+        except Exception as exc:  # noqa: BLE001
+            raise _exit_config_error(f"failed to parse instrument id: {exc}") from exc
+
+        # Per-venue run_id: when chaining, append the venue key so each
+        # subrun has its own log dir. When only one venue is involved,
+        # honor --run-id verbatim.
+        sub_run_id: str | None
+        if run_id is None:
+            sub_run_id = None
+        elif len(venue_keys) == 1:
+            sub_run_id = run_id
+        else:
+            sub_run_id = f"{run_id}-{venue_key}"
+
+        try:
+            with run_with_logging(
+                mode="health", run_id=sub_run_id, venues_cfg=venues_cfg
+            ) as ctx:
+                result = probe(
+                    venues_cfg,
+                    instruments=venue_iids,
+                    timeout_s=float(timeout),
+                    run_id=ctx.run_id,
+                    logs_root=ctx.logs_root,
+                )
+        except (MainnetRefusedError, VenueConfigError) as exc:
+            raise _exit_config_error(str(exc)) from exc
+
+        per_venue_outputs.append((venue_key, result))
+        if not result.passed:
+            overall_pass = False
+
+    typer.echo("")
+    for venue_key, result in per_venue_outputs:
+        typer.echo(f"== {venue_key} ==")
+        typer.echo(f"  run_id:  {result.run_id}")
+        typer.echo(f"  summary: {result.summary_path}")
+        for iid_str, entry in result.summary["per_instrument"].items():
+            if entry["first_quote_iso"] is None:
+                typer.echo(f"    {iid_str}: NO QUOTE within {timeout}s")
+            else:
+                typer.echo(
+                    f"    {iid_str}: first_quote={entry['first_quote_iso']} "
+                    f"(+{entry['first_quote_latency_ms']} ms)"
+                )
+
+    if not overall_pass:
         typer.echo("health check FAILED (one or more channels saw no quote).", err=True)
         raise typer.Exit(code=1)
     typer.echo("health check PASSED.")
