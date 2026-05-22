@@ -578,6 +578,163 @@ def scan_universe(
             typer.echo(f"    - {spec.symbol}{extras}")
 
 
+@scan_app.command("run")
+def scan_run(
+    universe_path: Path = typer.Option(
+        Path("config/universe.example.yaml"),
+        "--universe",
+        help="Path to the universe yaml (default: config/universe.example.yaml).",
+    ),
+    scanner: str = typer.Option(
+        "momentum",
+        "--scanner",
+        help="Scanner registry key (momentum / mean_reversion / breakout / spread).",
+    ),
+    bar: str = typer.Option("1m", "--bar", help="Bar spec, e.g. 1m, 5m, 1h"),
+    since: str | None = typer.Option(
+        None, "--since", help="ISO-8601 lower bound (inclusive)."
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="ISO-8601 upper bound (inclusive)."
+    ),
+    scoring: str = typer.Option(
+        "sharpe", "--scoring", help="Ranking rule: sharpe | total_return | robust."
+    ),
+    top_k: int = typer.Option(
+        5, "--top-k", help="Keep this many top-ranked parameter combos."
+    ),
+    catalog_path: Path | None = typer.Option(
+        None, "--catalog", help="Catalog root (default: <repo>/data/catalog)."
+    ),
+    queue_root: Path = typer.Option(
+        Path("data/signals"),
+        "--queue-root",
+        help="Signal queue root directory (default: data/signals).",
+    ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Exit 1 when zero signals are emitted."
+    ),
+    run_id: str | None = typer.Option(
+        None, "--run-id", help="Override the auto-generated run id."
+    ),
+) -> None:
+    """Run one scanner over a universe and write signals to the queue."""
+    from xtrade.observability import run_with_logging
+    from xtrade.research.runner import ScanError, run_scan
+    from xtrade.research.scanners import available_scanners
+    from xtrade.research.universe import UniverseConfigError
+
+    if scanner not in available_scanners():
+        raise _exit_config_error(
+            f"--scanner must be one of {available_scanners()}, got {scanner!r}"
+        )
+
+    since_ns = _parse_iso_to_ms(since) * 1_000_000 if since else None
+    until_ns = _parse_iso_to_ms(until, end_of_day=True) * 1_000_000 if until else None
+    if since_ns is not None and until_ns is not None and until_ns <= since_ns:
+        raise _exit_config_error(f"--until ({until}) must be after --since ({since})")
+
+    try:
+        with run_with_logging(mode="scan", run_id=run_id) as ctx:
+            result = run_scan(
+                universe_path=universe_path,
+                scanner_name=scanner,
+                bar=bar,
+                since_ns=since_ns,
+                until_ns=until_ns,
+                param_grid=None,  # use scanner default for now
+                scoring=scoring,
+                top_k=top_k,
+                queue_root=queue_root,
+                log_dir=ctx.log_dir,
+                run_id=ctx.run_id,
+                catalog_path=catalog_path,
+                strict=strict,
+            )
+    except UniverseConfigError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    except ValueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    except ScanError as exc:
+        typer.echo(f"scan failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    s = result.summary
+    typer.echo(f"run_id:           {s['run_id']}")
+    typer.echo(f"scanner:          {s['scanner']}")
+    typer.echo(f"universe_size:    {s['universe_size']}")
+    if s["universe_skipped"]:
+        typer.echo(f"  skipped:        {len(s['universe_skipped'])}")
+    typer.echo(f"param_combos:     {s['param_combos']}")
+    typer.echo(f"signals_emitted:  {s['signals_emitted']}")
+    typer.echo(f"elapsed_s:        {s['elapsed_s']}")
+    typer.echo(f"summary:          {result.summary_path}")
+
+    if not result.top_k.empty:
+        typer.echo("\ntop-k parameter combos:")
+        for row in result.top_k.itertuples(index=False):
+            typer.echo(
+                f"  {row.params}  sharpe={row.sharpe:.3f}  "
+                f"return={row.total_return:.3f}  n_trades={row.n_trades}"
+            )
+
+    if not result.passed:
+        typer.echo("scan FAILED (strict mode: zero signals emitted).", err=True)
+        raise typer.Exit(code=1)
+
+
+@scan_app.command("inspect")
+def scan_inspect(
+    queue_root: Path = typer.Option(
+        Path("data/signals"),
+        "--queue-root",
+        help="Signal queue root (default: data/signals).",
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="ISO-8601 lower bound (inclusive)."
+    ),
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by source (scanner:hash)."
+    ),
+    symbol: str | None = typer.Option(
+        None, "--symbol", help="Filter by symbol (Nautilus InstrumentId)."
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max signals to display."),
+) -> None:
+    """List recent signals from the on-disk queue."""
+    from xtrade.research.signals import SignalQueue
+
+    if not queue_root.exists():
+        typer.echo(f"queue root does not exist: {queue_root}")
+        return
+
+    queue = SignalQueue(queue_root)
+
+    if since is not None:
+        since_ms = _parse_iso_to_ms(since)
+        since_dt = dt.datetime.fromtimestamp(since_ms / 1000, tz=dt.timezone.utc)
+        candidates = queue.since(since_dt)
+    else:
+        candidates = list(queue)
+
+    if source is not None or symbol is not None:
+        candidates = [
+            s
+            for s in candidates
+            if (source is None or s.source == source)
+            and (symbol is None or s.symbol == symbol)
+        ]
+
+    tail = candidates[-limit:] if limit > 0 else candidates
+    typer.echo(f"queue:    {queue_root}")
+    typer.echo(f"matching: {len(candidates)} (showing last {len(tail)})")
+    for s in tail:
+        typer.echo(
+            f"  {s.generated_at.isoformat()}  {s.symbol:<24}  "
+            f"{s.direction:<5}  strength={s.strength:+.2f}  source={s.source}"
+        )
+
+
 def main() -> None:  # pragma: no cover - thin shim
     """Module-level entry for `python -m xtrade.cli`."""
     app()
