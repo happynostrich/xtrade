@@ -18,6 +18,7 @@ from xtrade.research.scanners import (
     available_scanners,
     get_scanner,
 )
+from xtrade.research.signals import Signal, SignalQueue
 from xtrade.research.universe import (
     SymbolSpec,
     UniverseConfig,
@@ -30,6 +31,8 @@ __all__ = [
     "MeanReversionScanner",
     "MomentumScanner",
     "Scanner",
+    "Signal",
+    "SignalQueue",
     "SpreadScanner",
     "SymbolSpec",
     "UniverseConfig",
