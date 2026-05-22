@@ -61,6 +61,20 @@ class MainnetRefusedError(RuntimeError):
     """
 
 
+class VenueConfigError(RuntimeError):
+    """Raised when a venue config is internally inconsistent.
+
+    Examples:
+
+      - Binance spot and futures both populated on a single yaml. Nautilus
+        derives the registered ``Venue`` from the ``BinanceExecClientConfig``
+        payload (always ``Venue('BINANCE')``) regardless of the outer
+        ``exec_clients`` dict key, so two Binance subaccount clients
+        collide at ``ExecutionEngine.register_client``. The fix is to
+        split into two yamls (or null one subaccount out of the other).
+    """
+
+
 def _assert_testnet_only(venues: VenuesConfig) -> None:
     """Hard-fail if any configured client points at mainnet."""
     b = venues.binance
@@ -86,7 +100,25 @@ def _build_binance_clients(b: BinanceVenueConfig) -> tuple[dict, dict, list]:
     """Build BINANCE data+exec client configs for whichever subaccounts
     are present. Returns (data_clients, exec_clients, factories) where
     `factories` is a list of (key, data_factory, exec_factory) tuples
-    the caller must register on the TradingNode."""
+    the caller must register on the TradingNode.
+
+    Raises
+    ------
+    VenueConfigError
+        If both ``b.spot`` and ``b.futures`` are populated. Nautilus
+        registers both clients under ``Venue('BINANCE')`` regardless of
+        the outer ``exec_clients`` dict key (see ``VenueConfigError``);
+        the operator must split into two yamls or null one out.
+    """
+    if b.spot is not None and b.futures is not None:
+        raise VenueConfigError(
+            "Binance spot and futures cannot coexist on a single TradingNode: "
+            "Nautilus's ExecutionEngine registers both clients under "
+            "Venue('BINANCE'). Split your venues yaml into two files (one for "
+            "spot, one for futures) and pass --venues-yaml accordingly, or set "
+            "the unused subaccount to null in this yaml."
+        )
+
     from nautilus_trader.adapters.binance.common.enums import (
         BinanceAccountType,
         BinanceEnvironment,
@@ -131,15 +163,16 @@ def _build_binance_clients(b: BinanceVenueConfig) -> tuple[dict, dict, list]:
         fut: BinanceFuturesConfig = b.futures
         acct = BinanceAccountType[_BINANCE_ACCOUNT_TYPE_MAP[fut.account_type]]
         env = BinanceEnvironment[fut.environment]
-        key = "BINANCE_FUTURES" if "BINANCE" in data_clients else "BINANCE"
-        data_clients[key] = BinanceDataClientConfig(
+        # spot+futures coexistence is rejected above, so the futures
+        # client always claims the canonical "BINANCE" key.
+        data_clients["BINANCE"] = BinanceDataClientConfig(
             api_key=fut.api_key,
             api_secret=fut.api_secret,
             account_type=acct,
             environment=env,
             instrument_provider=provider,
         )
-        exec_clients[key] = BinanceExecClientConfig(
+        exec_clients["BINANCE"] = BinanceExecClientConfig(
             api_key=fut.api_key,
             api_secret=fut.api_secret,
             account_type=acct,

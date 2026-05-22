@@ -222,6 +222,79 @@ def test_live_health_rejects_empty_venues_list() -> None:
 
 
 # ---------------------------------------------------------------------------
+# `xtrade live health` — venue inference from --instrument
+# ---------------------------------------------------------------------------
+
+
+def test_venue_for_instrument_unit_mapping() -> None:
+    """Per-instrument-id venue inference is the table the runbook documents."""
+    from xtrade.cli import _venue_for_instrument
+
+    assert _venue_for_instrument("BTCUSDT.BINANCE") == "binance_spot"
+    assert _venue_for_instrument("ETHUSDT.BINANCE") == "binance_spot"
+    assert _venue_for_instrument("BTCUSDT-PERP.BINANCE") == "binance_futures"
+    assert _venue_for_instrument("ETHUSDT-PERP.BINANCE") == "binance_futures"
+    assert _venue_for_instrument("BTC-USD-PERP.HYPERLIQUID") == "hyperliquid"
+
+
+def test_live_health_infers_futures_venue_from_perp_instrument(tmp_path: Path) -> None:
+    """`--instrument BTCUSDT-PERP.BINANCE` + default --venues → binance_futures only.
+
+    The CLI prints an explanatory `note:` to stderr so the inference is
+    visible to the operator. We don't reach the node build path (yaml
+    intentionally missing), but the inference must happen before yaml
+    load so the note appears regardless.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "live", "health",
+            "--instrument", "BTCUSDT-PERP.BINANCE",
+            "--timeout", "5",
+            "--venues-yaml", str(tmp_path / "does-not-exist.yaml"),
+        ],
+    )
+    # Exit 2 because the yaml doesn't exist — that's fine; what matters
+    # is the inference note fired before the yaml-load error.
+    assert result.exit_code == 2
+    assert "binance_futures" in result.stderr
+    assert "binance_spot" not in result.stderr
+    assert "hyperliquid" not in result.stderr
+
+
+def test_live_health_infers_spot_venue_from_spot_instrument(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "live", "health",
+            "--instrument", "BTCUSDT.BINANCE",
+            "--timeout", "5",
+            "--venues-yaml", str(tmp_path / "does-not-exist.yaml"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "binance_spot" in result.stderr
+    assert "binance_futures" not in result.stderr
+
+
+def test_live_health_does_not_infer_when_venues_explicit(tmp_path: Path) -> None:
+    """Explicit `--venues` suppresses inference — operator wins."""
+    result = runner.invoke(
+        app,
+        [
+            "live", "health",
+            "--venues", "binance_spot",
+            "--instrument", "BTCUSDT-PERP.BINANCE",
+            "--timeout", "5",
+            "--venues-yaml", str(tmp_path / "does-not-exist.yaml"),
+        ],
+    )
+    assert result.exit_code == 2
+    # No "inferred ..." note — operator's --venues should pass through.
+    assert "inferred" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
 # `xtrade live run` — config errors (no kernel construction)
 # ---------------------------------------------------------------------------
 

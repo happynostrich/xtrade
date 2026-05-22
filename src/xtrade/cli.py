@@ -361,13 +361,40 @@ _DEFAULT_HEALTH_INSTRUMENTS: dict[str, str] = {
     "hyperliquid": "BTC-USD-PERP.HYPERLIQUID",
 }
 
+_DEFAULT_LIVE_HEALTH_VENUES = "binance_spot,binance_futures,hyperliquid"
+
+
+def _venue_for_instrument(iid_str: str) -> str:
+    """Map a Nautilus instrument id to the venue key that handles it.
+
+    Used by `xtrade live health` when the operator passes `--instrument`
+    but leaves `--venues` at its default — probing all three venues is
+    rarely what the operator means in that case, and (because Binance
+    spot+futures share `Venue('BINANCE')` inside Nautilus) tripping
+    both Binance subaccounts at once breaks `node.build()`.
+    """
+    if iid_str.endswith(".HYPERLIQUID"):
+        return "hyperliquid"
+    if iid_str.endswith(".BINANCE"):
+        # Convention: futures perps carry "-PERP" in the symbol part.
+        symbol = iid_str.split(".", 1)[0]
+        return "binance_futures" if "-PERP" in symbol else "binance_spot"
+    raise typer.BadParameter(
+        f"cannot infer venue for instrument id {iid_str!r}; pass --venues explicitly."
+    )
+
 
 @live_app.command("health")
 def live_health(
     venues: str = typer.Option(
-        "binance_spot,binance_futures,hyperliquid",
+        _DEFAULT_LIVE_HEALTH_VENUES,
         "--venues",
-        help="Comma-separated venue keys from venues yaml.",
+        help=(
+            "Comma-separated venue keys from venues yaml. When --instrument is "
+            "given and --venues is left at its default, venues are inferred "
+            "from each instrument id (Binance spot+futures cannot probe in one "
+            "node — see VenueConfigError)."
+        ),
     ),
     instruments: str | None = typer.Option(
         None,
@@ -389,11 +416,30 @@ def live_health(
     from nautilus_trader.model.identifiers import InstrumentId
 
     from xtrade.config import ConfigError, MissingCredentialError, load_venues
-    from xtrade.node.factory import MainnetRefusedError
+    from xtrade.node.factory import MainnetRefusedError, VenueConfigError
     from xtrade.node.health import probe
     from xtrade.observability import run_with_logging
 
-    venue_keys = [v.strip() for v in venues.split(",") if v.strip()]
+    # If --instrument is given AND --venues is still the default, infer
+    # the venue subset from the instrument id(s). This avoids probing
+    # all three default venues when the operator clearly meant only one,
+    # and dodges the spot+futures-coexist VenueConfigError in the common
+    # case of a yaml that has both populated.
+    if instruments and venues == _DEFAULT_LIVE_HEALTH_VENUES:
+        raw_iids = [s.strip() for s in instruments.split(",") if s.strip()]
+        try:
+            inferred = sorted({_venue_for_instrument(s) for s in raw_iids})
+        except typer.BadParameter as exc:
+            raise _exit_config_error(str(exc)) from exc
+        venue_keys = inferred
+        typer.echo(
+            f"note: --venues defaulted; inferred {venue_keys} from "
+            f"--instrument={raw_iids}.",
+            err=True,
+        )
+    else:
+        venue_keys = [v.strip() for v in venues.split(",") if v.strip()]
+
     if not venue_keys:
         raise _exit_config_error("--venues must not be empty.")
     unknown = [v for v in venue_keys if v not in _DEFAULT_HEALTH_INSTRUMENTS]
@@ -429,7 +475,7 @@ def live_health(
                 run_id=ctx.run_id,
                 logs_root=ctx.logs_root,
             )
-    except MainnetRefusedError as exc:
+    except (MainnetRefusedError, VenueConfigError) as exc:
         raise _exit_config_error(str(exc)) from exc
 
     typer.echo(f"run_id:       {result.run_id}")
@@ -487,7 +533,7 @@ def live_run(
 
     from xtrade.config import ConfigError, MissingCredentialError, load_venues
     from xtrade.live.runner import available_live_strategies, run_live
-    from xtrade.node.factory import MainnetRefusedError
+    from xtrade.node.factory import MainnetRefusedError, VenueConfigError
     from xtrade.observability import run_with_logging
 
     if strategy not in available_live_strategies():
@@ -525,7 +571,7 @@ def live_run(
                 run_id=ctx.run_id,
                 logs_root=ctx.logs_root,
             )
-    except MainnetRefusedError as exc:
+    except (MainnetRefusedError, VenueConfigError) as exc:
         raise _exit_config_error(str(exc)) from exc
 
     s = result.summary
@@ -624,7 +670,7 @@ def live_signal_run(
         StrategyEmittedNothingError,
         run_live_signal,
     )
-    from xtrade.node.factory import MainnetRefusedError
+    from xtrade.node.factory import MainnetRefusedError, VenueConfigError
     from xtrade.observability import run_with_logging
     from xtrade.risk import load_rules_from_yaml
 
@@ -671,7 +717,7 @@ def live_signal_run(
                 run_id=ctx.run_id,
                 logs_root=ctx.logs_root,
             )
-    except MainnetRefusedError as exc:
+    except (MainnetRefusedError, VenueConfigError) as exc:
         raise _exit_config_error(str(exc)) from exc
     except (NoMatchingSignalError, StrategyEmittedNothingError) as exc:
         raise _exit_config_error(str(exc)) from exc

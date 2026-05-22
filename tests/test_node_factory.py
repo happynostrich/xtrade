@@ -33,6 +33,7 @@ from xtrade.config import (
 )
 from xtrade.node.factory import (
     MainnetRefusedError,
+    VenueConfigError,
     _assert_testnet_only,
     _build_binance_clients,
     _build_hyperliquid_clients,
@@ -146,15 +147,23 @@ def test_build_binance_clients_spot_only_uses_binance_key() -> None:
     assert factories[0][2] is BinanceLiveExecClientFactory
 
 
-def test_build_binance_clients_spot_and_futures_distinct_keys() -> None:
+def test_build_binance_clients_rejects_spot_and_futures_coexistence() -> None:
+    """Spot + futures cannot share one TradingNode.
+
+    Even though the factory used to disambiguate at the dict-key level
+    (`"BINANCE"` vs `"BINANCE_FUTURES"`), Nautilus's ExecutionEngine
+    derives the registered `Venue` from the `BinanceExecClientConfig`
+    payload (always `Venue('BINANCE')`) regardless of the outer key, so
+    both subaccount clients collide at `register_client`. The factory
+    now refuses this configuration with a clear `VenueConfigError`
+    instead of letting Nautilus blow up at `node.build()` time.
+    """
     b = BinanceVenueConfig(
         spot=_binance_spot("TESTNET"),
         futures=_binance_futures("TESTNET"),
     )
-    data_clients, exec_clients, factories = _build_binance_clients(b)
-    assert set(data_clients) == {"BINANCE", "BINANCE_FUTURES"}
-    assert set(exec_clients) == {"BINANCE", "BINANCE_FUTURES"}
-    assert {k for k, _, _ in factories} == {"BINANCE", "BINANCE_FUTURES"}
+    with pytest.raises(VenueConfigError, match="spot and futures cannot coexist"):
+        _build_binance_clients(b)
 
 
 def test_build_binance_clients_futures_only_uses_binance_key() -> None:
