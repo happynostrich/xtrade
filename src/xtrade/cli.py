@@ -552,6 +552,174 @@ def live_run(
     typer.echo("live run PASSED.")
 
 
+@live_app.command("signal-run")
+def live_signal_run(
+    strategy: str = typer.Option(
+        ..., "--strategy", help="SignalDrivenStrategy registry key."
+    ),
+    instrument: str = typer.Option(
+        ..., "--instrument", help="Instrument id (e.g. BTCUSDT.BINANCE)."
+    ),
+    signals_from: Path = typer.Option(
+        ..., "--signals-from", help="SignalQueue root directory."
+    ),
+    mode: str = typer.Option(
+        "manual",
+        "--mode",
+        help="auto / dry_run / manual (default manual for testnet hop).",
+    ),
+    signal_id: str | None = typer.Option(
+        None,
+        "--signal-id",
+        help="Composite '<generated_at>|<symbol>|<source>'; default newest.",
+    ),
+    venues_yaml: Path = typer.Option(
+        Path("config/venues.testnet.yaml"),
+        "--venues-yaml",
+        help="Path to the venues yaml (default: config/venues.testnet.yaml).",
+    ),
+    safety_multiplier: str = typer.Option(
+        "0.7",
+        "--safety-multiplier",
+        help="Far-from-market multiplier for the testnet limit order.",
+    ),
+    approval_timeout: int = typer.Option(
+        600,
+        "--approval-timeout",
+        help="Max wall-clock seconds to wait for manual approval.",
+    ),
+    poll_interval: float = typer.Option(
+        2.0, "--poll-interval", help="Seconds between approval-queue polls."
+    ),
+    venue_timeout: int = typer.Option(
+        60, "--venue-timeout", help="Per-probe testnet timeout (seconds)."
+    ),
+    risk_config: Path | None = typer.Option(
+        None, "--risk-config", help="Path to risk.yaml."
+    ),
+    approvals_root: Path | None = typer.Option(
+        None, "--approvals-root", help="Approvals queue root."
+    ),
+    run_id: str | None = typer.Option(
+        None, "--run-id", help="Override the auto run id."
+    ),
+) -> None:
+    """Drive one signal → RiskGate → ApprovalGate → testnet limit-and-cancel.
+
+    This is the Phase 3 Task 6 testnet runbook entry point. Manual mode
+    parks the intent in the approval queue and polls until an operator
+    runs `xtrade approve confirm <id>` (or the timeout expires).
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from xtrade.config import ConfigError, MissingCredentialError, load_venues
+    from xtrade.live.signal_runner import (
+        ApprovalRejectedError,
+        ApprovalTimeoutError,
+        LiveSignalError,
+        NoMatchingSignalError,
+        RiskRejectedError,
+        StrategyEmittedNothingError,
+        run_live_signal,
+    )
+    from xtrade.node.factory import MainnetRefusedError
+    from xtrade.observability import run_with_logging
+    from xtrade.risk import load_rules_from_yaml
+
+    if mode not in {"auto", "dry_run", "manual"}:
+        raise _exit_config_error(
+            f"--mode must be auto/dry_run/manual, got {mode!r}"
+        )
+    try:
+        mult = Decimal(safety_multiplier)
+    except (InvalidOperation, ValueError) as exc:
+        raise _exit_config_error(f"--safety-multiplier must be decimal: {exc}") from exc
+    if mult <= 0:
+        raise _exit_config_error("--safety-multiplier must be > 0")
+
+    rules = []
+    if risk_config is not None:
+        try:
+            rules = load_rules_from_yaml(risk_config)
+        except (FileNotFoundError, ValueError) as exc:
+            raise _exit_config_error(str(exc)) from exc
+
+    try:
+        venues_cfg = load_venues(venues_yaml)
+    except (ConfigError, MissingCredentialError) as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    try:
+        with run_with_logging(
+            mode="live", run_id=run_id, venues_cfg=venues_cfg
+        ) as ctx:
+            result = run_live_signal(
+                venues_cfg,
+                strategy_name=strategy,
+                signals_root=signals_from,
+                instrument_id=instrument,
+                approval_mode=mode,
+                signal_id=signal_id,
+                risk_rules=rules,
+                safety_multiplier=mult,
+                approval_timeout_s=float(approval_timeout),
+                poll_interval_s=float(poll_interval),
+                venue_timeout_s=float(venue_timeout),
+                approvals_root=approvals_root,
+                run_id=ctx.run_id,
+                logs_root=ctx.logs_root,
+            )
+    except MainnetRefusedError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    except (NoMatchingSignalError, StrategyEmittedNothingError) as exc:
+        raise _exit_config_error(str(exc)) from exc
+    except (RiskRejectedError, ApprovalRejectedError, ApprovalTimeoutError) as exc:
+        typer.echo(f"live signal-run FAILED: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except LiveSignalError as exc:
+        typer.echo(f"live signal-run FAILED: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    s = result.summary
+    typer.echo(f"run_id:        {s['run_id']}")
+    typer.echo(f"strategy:      {s['strategy']}")
+    typer.echo(f"instrument:    {s['instrument_id']}")
+    typer.echo(f"approval_mode: {s['approval_mode']}")
+    sig = s["signal"]
+    typer.echo(
+        f"signal:        {sig['symbol']} {sig['direction']} "
+        f"strength={sig['strength']} @ {sig['generated_at']}"
+    )
+    intent = s["intent"]
+    typer.echo(
+        f"intent:        {intent['side']} {intent['quantity']} "
+        f"{intent['symbol']} ({intent['order_type']})"
+    )
+    appr = s["approval"]
+    typer.echo(
+        f"approval:      {appr['record_id']} status={appr['status']} "
+        f"mode={appr['mode']} go={appr['go']}"
+    )
+    if s.get("live_summary"):
+        order = s["live_summary"].get("order", {})
+        typer.echo(
+            f"venue order:   accepted={order.get('accepted')} "
+            f"canceled={order.get('canceled')} rejected={order.get('rejected')}"
+        )
+    typer.echo(f"summary:       {result.summary_path}")
+    typer.echo(f"note:          {s['note']}")
+
+    if not result.passed:
+        # auto/manual paths only — dry_run intentionally writes passed=False
+        # but should not be treated as a process failure.
+        if s["approval_mode"] == "dry_run":
+            typer.echo("dry_run: intent recorded, no venue submission.")
+            return
+        typer.echo("live signal-run FAILED (lifecycle incomplete).", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("live signal-run PASSED.")
+
+
 # ---------------------------------------------------------------------------
 # `xtrade scan ...` (Phase 2 — opportunity discovery / scanner layer)
 # ---------------------------------------------------------------------------
