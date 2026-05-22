@@ -1,0 +1,40 @@
+# xtrade testnet venues configuration (Phase 1).
+#
+# This file references env-var NAMES only (key/secret values live in `.env`,
+# which is gitignored). Per Phase 1 brief §6 "Security boundary", literal
+# secrets must never appear here.
+#
+# Loaded by `xtrade.config.load_venues()` into a `VenuesConfig` dataclass.
+# Consumers: `xtrade.node.factory.build_testnet_node` (Task 3).
+
+binance:
+  # Default environment for Binance subaccounts. Each subaccount may
+  # override `environment:` individually. For USDT-M Futures after the
+  # 2026 Demo Trading migration: keep `TESTNET` — Nautilus 1.227 routes
+  # TESTNET to the new `demo-fapi.binance.com` REST automatically while
+  # still using the reachable `stream.binancefuture.com` WS market URL.
+  # `DEMO` routes WS market to `demo-fstream.binance.com` which is
+  # currently unreachable (see docs/phase0_results.md "open items").
+  environment: TESTNET
+
+  spot:
+    api_key_env: BINANCE_SPOT_TESTNET_API_KEY
+    api_secret_env: BINANCE_SPOT_TESTNET_API_SECRET
+    key_type: ED25519
+    account_type: SPOT
+
+  futures:
+    api_key_env: BINANCE_FUTURES_TESTNET_API_KEY
+    api_secret_env: BINANCE_FUTURES_TESTNET_API_SECRET
+    key_type: ED25519
+    account_type: USDT_FUTURE
+
+hyperliquid:
+  environment: TESTNET
+  account_address_env: HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS
+  api_wallet_key_env: HYPERLIQUID_TESTNET_API_WALLET_KEY
+  vault_address_env: HYPERLIQUID_TESTNET_VAULT_ADDRESS  # optional; unset = no vault
+  unified_account: true
+  # HIP-3 trading DEX for trade.xyz-style perp markets. Used by Task 4
+  # ingest (`xtrade data ingest --venue hyperliquid --symbol xyz:TSLA`).
+  trading_dex: xyz
