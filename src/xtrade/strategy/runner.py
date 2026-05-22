@@ -303,6 +303,7 @@ def run_paper(
         "approvals_rejected": bridge.approvals_rejected,
         "approvals_dry_run": bridge.approvals_dry_run,
         "fills": orders_filled,
+        "fill_events": list(bridge.fill_events),
         "final_cash_usd": str(bridge.cash_usd),
         "final_position_qty": str(bridge.positions.get(str(instr_id), Decimal(0))),
         "final_nav_usd": str(bridge.nav_usd),
@@ -384,6 +385,10 @@ def _build_bridge_strategy(
             self.nav_usd: Decimal = starting_cash
             self.peak_nav_usd: Decimal = starting_cash
             self.max_drawdown_pct: Decimal = Decimal(0)
+            # Per-fill log (Task 7 / T7 replay parity): we keep enough to
+            # compare two runs fill-for-fill (ts/side/qty/price/symbol),
+            # Decimal-strict via stringification.
+            self.fill_events: list[dict[str, Any]] = []
 
         # ---- lifecycle -------------------------------------------------
 
@@ -475,11 +480,19 @@ def _build_bridge_strategy(
             except Exception:  # pragma: no cover
                 return
             sym = _SYMBOL_KEY
-            sign = Decimal(1) if str(event.order_side) == "BUY" else Decimal(-1)
+            side_str = str(event.order_side)
+            sign = Decimal(1) if side_str == "BUY" else Decimal(-1)
             self.positions[sym] = self.positions.get(sym, Decimal(0)) + sign * qty
             self.cash_usd -= sign * qty * price
             self.marks[sym] = price  # latest exec is a good mark too
             self._recompute_nav()
+            self.fill_events.append({
+                "ts_event": int(event.ts_event),
+                "symbol": sym,
+                "side": side_str,
+                "qty": str(qty),
+                "price": str(price),
+            })
 
         # ---- snapshot + nav -------------------------------------------
 
