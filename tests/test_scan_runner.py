@@ -302,3 +302,83 @@ def test_run_scan_summary_is_json_serialisable(populated_env) -> None:
     # Already round-tripped on disk by `run_scan`; sanity dump from memory.
     payload = json.dumps(result.summary)
     assert "run_id" in payload
+
+
+# ---------------------------------------------------------------------------
+# S8: scan_summary.json schema contract
+# ---------------------------------------------------------------------------
+
+
+_REQUIRED_SUMMARY_FIELDS = frozenset({
+    "run_id",
+    "started_at",
+    "completed_at",
+    "universe_size",
+    "scanner",
+    "param_combos",
+    "signals_emitted",
+    "top_k",
+    "elapsed_s",
+    "errors",
+})
+
+
+def test_scan_summary_contains_every_required_field(populated_env) -> None:
+    """S8 contract: `scan_summary.json` must include every field listed
+    in `docs/phase2_brief.md §5 Task 8`."""
+    env = populated_env
+    result = run_scan(
+        universe_path=env["universe"],
+        scanner_name="momentum",
+        bar="1m",
+        since_ns=None,
+        until_ns=None,
+        param_grid={"fast": [5], "slow": [20]},
+        scoring="sharpe",
+        top_k=1,
+        queue_root=env["queue"],
+        log_dir=env["logs"],
+        run_id="schema-check",
+        catalog_path=env["catalog"],
+    )
+    on_disk = json.loads(result.summary_path.read_text())
+    missing = _REQUIRED_SUMMARY_FIELDS - on_disk.keys()
+    assert not missing, f"scan_summary.json missing required fields: {sorted(missing)}"
+    # Result.summary and on-disk file must agree byte-for-byte (atomic
+    # write contract).
+    assert on_disk == result.summary
+
+
+def test_scan_summary_field_types(populated_env) -> None:
+    env = populated_env
+    result = run_scan(
+        universe_path=env["universe"],
+        scanner_name="momentum",
+        bar="1m",
+        since_ns=None,
+        until_ns=None,
+        param_grid={"fast": [5], "slow": [20]},
+        scoring="sharpe",
+        top_k=1,
+        queue_root=env["queue"],
+        log_dir=env["logs"],
+        run_id="schema-types",
+        catalog_path=env["catalog"],
+    )
+    s = result.summary
+    assert isinstance(s["run_id"], str) and s["run_id"]
+    assert isinstance(s["started_at"], str)
+    assert isinstance(s["completed_at"], str)
+    assert isinstance(s["universe_size"], int) and s["universe_size"] >= 0
+    assert isinstance(s["scanner"], str)
+    assert isinstance(s["param_combos"], int) and s["param_combos"] >= 0
+    assert isinstance(s["signals_emitted"], int) and s["signals_emitted"] >= 0
+    assert isinstance(s["top_k"], int) and s["top_k"] >= 0
+    assert isinstance(s["elapsed_s"], (int, float)) and s["elapsed_s"] >= 0.0
+    assert isinstance(s["errors"], list)
+    # Timestamps must round-trip through fromisoformat.
+    import datetime as dt
+
+    started = dt.datetime.fromisoformat(s["started_at"])
+    completed = dt.datetime.fromisoformat(s["completed_at"])
+    assert completed >= started
