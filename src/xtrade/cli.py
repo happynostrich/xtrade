@@ -384,6 +384,56 @@ def _venue_for_instrument(iid_str: str) -> str:
     )
 
 
+def _narrow_venues_cfg(cfg, venue_keys: list[str]):
+    """Return a new VenuesConfig containing only the requested venue keys.
+
+    The loaded yaml may populate `binance.spot`, `binance.futures`, and
+    `hyperliquid` all at once even though a single `xtrade live health`
+    call only needs a subset. Passing the full config through to
+    `build_testnet_node` would trip the spot+futures coexistence guard
+    (Nautilus registers both Binance subaccounts under the same
+    `Venue('BINANCE')`), so we narrow here before handing off to
+    `probe()`.
+
+    Raises typer.Exit (via `_exit_config_error`) if a requested venue
+    key isn't present in the loaded yaml.
+    """
+    from xtrade.config import BinanceVenueConfig, VenuesConfig
+
+    want_spot = "binance_spot" in venue_keys
+    want_fut = "binance_futures" in venue_keys
+    want_hl = "hyperliquid" in venue_keys
+
+    missing: list[str] = []
+    if want_spot and (cfg.binance is None or cfg.binance.spot is None):
+        missing.append("binance_spot")
+    if want_fut and (cfg.binance is None or cfg.binance.futures is None):
+        missing.append("binance_futures")
+    if want_hl and cfg.hyperliquid is None:
+        missing.append("hyperliquid")
+    if missing:
+        raise _exit_config_error(
+            f"venue keys {missing} requested but not configured in "
+            f"venues yaml ({cfg.source_path}). Either populate them in "
+            f"the yaml or pass --venues with only the keys you've set up."
+        )
+
+    new_binance: BinanceVenueConfig | None = None
+    if want_spot or want_fut:
+        new_binance = BinanceVenueConfig(
+            spot=cfg.binance.spot if want_spot else None,
+            futures=cfg.binance.futures if want_fut else None,
+        )
+
+    new_hl = cfg.hyperliquid if want_hl else None
+
+    return VenuesConfig(
+        binance=new_binance,
+        hyperliquid=new_hl,
+        source_path=cfg.source_path,
+    )
+
+
 @live_app.command("health")
 def live_health(
     venues: str = typer.Option(
@@ -463,6 +513,12 @@ def live_health(
         venues_cfg = load_venues(venues_yaml)
     except (ConfigError, MissingCredentialError) as exc:
         raise _exit_config_error(str(exc)) from exc
+
+    # Narrow the loaded VenuesConfig to just the venues we're probing.
+    # Without this, a yaml that populates both binance.spot and
+    # binance.futures trips the factory's spot+futures coexistence guard
+    # even when the operator only asked for one of them.
+    venues_cfg = _narrow_venues_cfg(venues_cfg, venue_keys)
 
     try:
         with run_with_logging(

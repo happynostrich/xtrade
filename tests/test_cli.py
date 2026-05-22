@@ -237,6 +237,104 @@ def test_venue_for_instrument_unit_mapping() -> None:
     assert _venue_for_instrument("BTC-USD-PERP.HYPERLIQUID") == "hyperliquid"
 
 
+# ---------------------------------------------------------------------------
+# `_narrow_venues_cfg` — filter a loaded VenuesConfig to a venue-key subset
+# ---------------------------------------------------------------------------
+
+
+def _full_venues_cfg():
+    """In-memory VenuesConfig with all three subaccounts populated.
+
+    Mirrors `config/venues.testnet.yaml` shape but with dummy creds, so we
+    can exercise narrowing without any disk I/O or env-var resolution.
+    """
+    from xtrade.config import (
+        BinanceFuturesConfig,
+        BinanceSpotConfig,
+        BinanceVenueConfig,
+        HyperliquidVenueConfig,
+        VenuesConfig,
+    )
+
+    return VenuesConfig(
+        binance=BinanceVenueConfig(
+            spot=BinanceSpotConfig(
+                api_key="k", api_secret="s",
+                key_type="HMAC", account_type="SPOT",
+                environment="TESTNET",
+            ),
+            futures=BinanceFuturesConfig(
+                api_key="k", api_secret="s",
+                key_type="HMAC", account_type="USDT_FUTURE",
+                environment="TESTNET",
+            ),
+        ),
+        hyperliquid=HyperliquidVenueConfig(
+            account_address="0x" + "0" * 40,
+            api_wallet_key="0x" + "1" * 64,
+            environment="TESTNET",
+        ),
+    )
+
+
+def test_narrow_venues_cfg_keeps_only_binance_futures() -> None:
+    """The original bug repro: full yaml + inferred ['binance_futures']
+    must yield a VenuesConfig with binance.spot=None so the factory
+    guard doesn't fire."""
+    from xtrade.cli import _narrow_venues_cfg
+
+    cfg = _full_venues_cfg()
+    narrowed = _narrow_venues_cfg(cfg, ["binance_futures"])
+    assert narrowed.binance is not None
+    assert narrowed.binance.spot is None
+    assert narrowed.binance.futures is not None
+    assert narrowed.hyperliquid is None
+
+
+def test_narrow_venues_cfg_keeps_only_binance_spot() -> None:
+    from xtrade.cli import _narrow_venues_cfg
+
+    cfg = _full_venues_cfg()
+    narrowed = _narrow_venues_cfg(cfg, ["binance_spot"])
+    assert narrowed.binance is not None
+    assert narrowed.binance.spot is not None
+    assert narrowed.binance.futures is None
+    assert narrowed.hyperliquid is None
+
+
+def test_narrow_venues_cfg_drops_binance_entirely_for_hyperliquid_only() -> None:
+    from xtrade.cli import _narrow_venues_cfg
+
+    cfg = _full_venues_cfg()
+    narrowed = _narrow_venues_cfg(cfg, ["hyperliquid"])
+    assert narrowed.binance is None
+    assert narrowed.hyperliquid is not None
+
+
+def test_narrow_venues_cfg_rejects_missing_venue() -> None:
+    """If the operator asks for a key not in the yaml we exit 2 with a
+    clear message instead of silently dropping it."""
+    import typer
+
+    from xtrade.cli import _narrow_venues_cfg
+    from xtrade.config import HyperliquidVenueConfig, VenuesConfig
+
+    # Yaml only has hyperliquid; operator asks for binance_futures.
+    cfg = VenuesConfig(
+        hyperliquid=HyperliquidVenueConfig(
+            account_address="0x" + "0" * 40,
+            api_wallet_key="0x" + "1" * 64,
+            environment="TESTNET",
+        ),
+    )
+    try:
+        _narrow_venues_cfg(cfg, ["binance_futures"])
+    except typer.Exit as exc:
+        assert exc.exit_code == 2
+    else:
+        raise AssertionError("expected typer.Exit(2) for missing venue key")
+
+
 def test_live_health_infers_futures_venue_from_perp_instrument(tmp_path: Path) -> None:
     """`--instrument BTCUSDT-PERP.BINANCE` + default --venues → binance_futures only.
 
