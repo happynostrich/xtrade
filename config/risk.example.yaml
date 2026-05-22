@@ -1,0 +1,19 @@
+# Phase 3 risk module — example configuration.
+#
+# Every key is OPTIONAL. Missing keys leave the corresponding rule
+# un-installed; present keys install one instance of the matching rule.
+#
+# See `src/xtrade/risk/rules.py` for semantics.
+
+# Single-order notional cap (USD).
+max_notional_per_order_usd: 1000
+
+# Per-symbol gross exposure cap (USD).
+max_position_per_symbol_usd: 5000
+
+# Portfolio-wide gross notional cap (USD).
+max_total_notional_usd: 20000
+
+# Drawdown-from-peak-NAV cap. Block new exposure once exceeded; let
+# reduce_only intents through.
+max_drawdown_pct: 0.10
