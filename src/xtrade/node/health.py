@@ -101,9 +101,17 @@ class _HealthProbeStrategy(Strategy):
 
 
 async def _run_node_until(node, done_event: asyncio.Event, timeout_s: float) -> None:
-    """Drive a `TradingNode` until `done_event` is set or `timeout_s` elapses,
-    then stop the node cleanly. Mirrors Phase 0's `_common.run_node_until`.
+    """Build the node and drive it until `done_event` is set or
+    `timeout_s` elapses, then stop the node cleanly. Mirrors Phase 0's
+    `_common.run_node_until`.
+
+    `node.build()` is invoked here (inside the live event loop) rather
+    than by the caller. Nautilus's engines schedule async tasks during
+    `build()` and emit "Started when loop is not running" / "Async task
+    '_connect' created but event loop is not running" if the loop
+    isn't already up — the data client then never actually connects.
     """
+    node.build()
     run_task = asyncio.create_task(node.run_async())
     try:
         await asyncio.wait_for(done_event.wait(), timeout=timeout_s)
@@ -209,7 +217,6 @@ def probe(
         ),
     )
     node.trader.add_strategy(strategy)
-    node.build()
 
     try:
         asyncio.run(_run_node_until(node, strategy.done, timeout_s=timeout_s + 30.0))

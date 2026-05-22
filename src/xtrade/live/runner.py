@@ -99,10 +99,17 @@ def _utc_iso(ns: int | None) -> str | None:
 
 
 async def _run_node_until(node, done_event: asyncio.Event, timeout_s: float) -> None:
-    """Drive a `TradingNode` until `done_event` is set or `timeout_s`
-    elapses, then stop the node cleanly. Mirrors Phase 0's
+    """Build the node and drive it until `done_event` is set or
+    `timeout_s` elapses, then stop the node cleanly. Mirrors Phase 0's
     `_common.run_node_until`.
+
+    `node.build()` is invoked here (inside the live event loop) so the
+    Nautilus engines can schedule their async tasks against a running
+    loop. Calling `build()` outside the loop produces "Started when
+    loop is not running" warnings and a data client that silently
+    never connects.
     """
+    node.build()
     run_task = asyncio.create_task(node.run_async())
     try:
         await asyncio.wait_for(done_event.wait(), timeout=timeout_s)
@@ -231,7 +238,6 @@ def run_live(
         ),
     )
     node.trader.add_strategy(probe)
-    node.build()
 
     t0 = time.monotonic()
     try:

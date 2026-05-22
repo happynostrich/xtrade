@@ -13,8 +13,12 @@ Safety contract (per Phase 1 brief §6 "主网执行硬禁用"):
 The caller is expected to:
 
   1. Add strategies via `node.trader.add_strategy(...)`.
-  2. Call `node.build()`.
-  3. Drive the node with `node.run_async()` / `node.stop_async()`.
+  2. Drive the node with `node.run_async()` / `node.stop_async()`,
+     calling `node.build()` *inside* the running event loop. Nautilus's
+     engines schedule async tasks during `build()` and emit
+     "Started when loop is not running" warnings (and silently fail
+     to connect data clients) if `build()` is called before
+     `asyncio.run(...)`.
 
 Phase 0 reference: `scripts/phase0/02b_binance_spot_testnet_connectivity.py`
 and `scripts/phase0/03_hyperliquid_testnet_connectivity.py`.
