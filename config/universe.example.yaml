@@ -1,0 +1,37 @@
+# Example symbol universe for Phase 2 scanners.
+#
+# Format: top-level keys are venue tags recognised by
+# `xtrade.data.instruments.resolve` (currently `binance` and `hyperliquid`).
+# Each venue holds a list of mappings; only `symbol` is required.
+#
+# Optional per-row fields:
+#   quote:       quote currency (informational; default is per-venue —
+#                USDT for binance, USDC for hyperliquid).
+#   min_volume:  soft liquidity threshold a scanner may use to skip bars
+#                whose 24h volume is below this value (units are venue-native).
+#
+# This file lists scannable read-only universes from Binance USDT-M perp
+# mainnet (public REST proven in Phase 0 C6a) and the trade.xyz HIP-3 perp
+# dex on Hyperliquid mainnet (read-only proven in Phase 0 C4/C5).
+# Phase 2 never executes against these — execution remains testnet-only.
+
+binance:
+  - symbol: BTCUSDT
+    min_volume: 1000.0
+  - symbol: ETHUSDT
+    min_volume: 1000.0
+  - symbol: SOLUSDT
+  - symbol: BNBUSDT
+  - symbol: XRPUSDT
+  - symbol: ADAUSDT
+  - symbol: DOGEUSDT
+  - symbol: AVAXUSDT
+  - symbol: LINKUSDT
+  - symbol: ARBUSDT
+
+hyperliquid:
+  - symbol: xyz:TSLA
+  - symbol: xyz:NVDA
+  - symbol: xyz:AAPL
+  - symbol: xyz:MSFT
+  - symbol: xyz:GOOGL

@@ -38,10 +38,12 @@ app = typer.Typer(
 data_app = typer.Typer(help="Historical data ingest and catalog inspection.")
 backtest_app = typer.Typer(help="Run backtests against the local ParquetDataCatalog.")
 live_app = typer.Typer(help="Run testnet TradingNode probes and live strategies.")
+scan_app = typer.Typer(help="Phase 2 opportunity discovery: scanners over the catalog.")
 
 app.add_typer(data_app, name="data")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(live_app, name="live")
+app.add_typer(scan_app, name="scan")
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +544,38 @@ def live_run(
         typer.echo("live run FAILED (order lifecycle incomplete).", err=True)
         raise typer.Exit(code=1)
     typer.echo("live run PASSED.")
+
+
+# ---------------------------------------------------------------------------
+# `xtrade scan ...` (Phase 2 — opportunity discovery / scanner layer)
+# ---------------------------------------------------------------------------
+
+
+@scan_app.command("universe")
+def scan_universe(
+    config_path: Path = typer.Option(
+        Path("config/universe.example.yaml"),
+        "--config",
+        help="Path to the universe yaml (default: config/universe.example.yaml).",
+    ),
+) -> None:
+    """Parse a universe yaml and print the resolved symbol list."""
+    from xtrade.research.universe import UniverseConfigError, load_universe
+
+    try:
+        universe = load_universe(config_path)
+    except UniverseConfigError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    typer.echo(f"universe: {universe.source_path}")
+    typer.echo(f"symbols:  {len(universe)}")
+    for venue, rows in universe.by_venue().items():
+        typer.echo(f"  {venue} ({len(rows)}):")
+        for spec in rows:
+            extras = f" quote={spec.quote}"
+            if spec.min_volume is not None:
+                extras += f" min_volume={spec.min_volume}"
+            typer.echo(f"    - {spec.symbol}{extras}")
 
 
 def main() -> None:  # pragma: no cover - thin shim

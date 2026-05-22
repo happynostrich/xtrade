@@ -21,6 +21,10 @@ dependencies = [
     "pandas>=2.2",
     "pyyaml>=6.0",
     "typer>=0.12",
+    # Phase 2 research / scanner layer — vectorbt drives indicator
+    # computation, parameter grid search, and Portfolio.from_signals
+    # metric evaluation. See docs/phase2_brief.md.
+    "vectorbt>=0.26",
 ]
 
 [project.optional-dependencies]
