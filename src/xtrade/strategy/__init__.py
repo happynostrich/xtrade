@@ -19,22 +19,30 @@ Submodules
 """
 
 from xtrade.strategy.base import (
+    AccountSnapshot,
     SignalDrivenStrategy,
     StrategyRegistrationError,
     available_strategies,
     load_strategy,
     register_strategy,
 )
+from xtrade.strategy.consumer import SignalConsumer
 from xtrade.strategy.intent import (
     Fill,
     OrderIntent,
     OrderIntentError,
 )
 
+# Importing the plugins package registers all shipped strategies with
+# the global registry as a side effect.
+from xtrade.strategy import plugins as _plugins  # noqa: F401
+
 __all__ = [
+    "AccountSnapshot",
     "Fill",
     "OrderIntent",
     "OrderIntentError",
+    "SignalConsumer",
     "SignalDrivenStrategy",
     "StrategyRegistrationError",
     "available_strategies",
