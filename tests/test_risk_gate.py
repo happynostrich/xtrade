@@ -200,8 +200,20 @@ _FORBIDDEN_ATTR_NAMES: frozenset[str] = frozenset({
 })
 
 
+# `runner.py` is the SOLE module in the strategy package that is allowed
+# to call `submit_order` — that is the runner-mediated execution path
+# everything else must route through (Phase 3 brief §6). The lint below
+# scans all other strategy sources; if you add another runner-like module
+# (e.g. a live runner), exempt it here and add a separate test asserting
+# its submission path goes through RiskGate + ApprovalGate.
+_RUNNER_EXEMPT: frozenset[str] = frozenset({"runner.py"})
+
+
 def _walk_strategy_sources() -> list[Path]:
-    return sorted(STRATEGY_PKG.rglob("*.py"))
+    return sorted(
+        p for p in STRATEGY_PKG.rglob("*.py")
+        if p.name not in _RUNNER_EXEMPT
+    )
 
 
 def test_strategy_package_does_not_import_nautilus_execution() -> None:

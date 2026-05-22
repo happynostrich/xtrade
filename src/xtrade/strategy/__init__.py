@@ -32,6 +32,7 @@ from xtrade.strategy.intent import (
     OrderIntent,
     OrderIntentError,
 )
+from xtrade.strategy.runner import PaperRunResult, run_paper
 
 # Importing the plugins package registers all shipped strategies with
 # the global registry as a side effect.
@@ -42,6 +43,8 @@ __all__ = [
     "Fill",
     "OrderIntent",
     "OrderIntentError",
+    "PaperRunResult",
+    "run_paper",
     "SignalConsumer",
     "SignalDrivenStrategy",
     "StrategyRegistrationError",

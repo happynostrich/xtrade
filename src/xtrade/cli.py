@@ -39,11 +39,17 @@ data_app = typer.Typer(help="Historical data ingest and catalog inspection.")
 backtest_app = typer.Typer(help="Run backtests against the local ParquetDataCatalog.")
 live_app = typer.Typer(help="Run testnet TradingNode probes and live strategies.")
 scan_app = typer.Typer(help="Phase 2 opportunity discovery: scanners over the catalog.")
+strategy_app = typer.Typer(help="Phase 3 strategy plugin registry: list and describe.")
+paper_app = typer.Typer(help="Phase 3 paper-mode runs: signals + RiskGate + ApprovalGate + BacktestEngine.")
+approve_app = typer.Typer(help="Phase 3 approval queue: list / confirm / reject pending intents.")
 
 app.add_typer(data_app, name="data")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(live_app, name="live")
 app.add_typer(scan_app, name="scan")
+app.add_typer(strategy_app, name="strategy")
+app.add_typer(paper_app, name="paper")
+app.add_typer(approve_app, name="approve")
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +739,226 @@ def scan_inspect(
             f"  {s.generated_at.isoformat()}  {s.symbol:<24}  "
             f"{s.direction:<5}  strength={s.strength:+.2f}  source={s.source}"
         )
+
+
+# ---------------------------------------------------------------------------
+# `xtrade strategy ...`
+# ---------------------------------------------------------------------------
+
+
+@strategy_app.command("list")
+def strategy_list() -> None:
+    """List registered `SignalDrivenStrategy` plugins."""
+    # Importing the package triggers plugin registration via its
+    # __init__.py side effect.
+    import xtrade.strategy  # noqa: F401
+    from xtrade.strategy.base import available_strategies, load_strategy
+
+    names = available_strategies()
+    if not names:
+        typer.echo("(no strategies registered)")
+        return
+    for name in names:
+        try:
+            doc = (load_strategy(name).__class__.__doc__ or "").strip().splitlines()
+            tagline = doc[0] if doc else ""
+        except Exception:
+            tagline = ""
+        typer.echo(f"{name:<24}  {tagline}")
+
+
+@strategy_app.command("describe")
+def strategy_describe(
+    name: str = typer.Argument(..., help="Strategy registry key."),
+) -> None:
+    """Print a JSON description of one strategy."""
+    import json as _json
+
+    import xtrade.strategy  # noqa: F401
+    from xtrade.strategy.base import (
+        StrategyRegistrationError,
+        available_strategies,
+        load_strategy,
+    )
+
+    try:
+        strat = load_strategy(name)
+    except StrategyRegistrationError as exc:
+        raise _exit_config_error(
+            f"unknown strategy {name!r}; available: {available_strategies()}"
+        ) from exc
+    typer.echo(_json.dumps(strat.describe(), indent=2, default=str, sort_keys=True))
+
+
+# ---------------------------------------------------------------------------
+# `xtrade approve ...`
+# ---------------------------------------------------------------------------
+
+
+def _approvals_root(override: Path | None) -> Path:
+    if override is not None:
+        return override
+    repo_root = Path(__file__).resolve().parents[2]
+    return repo_root / "data" / "approvals"
+
+
+@approve_app.command("list")
+def approve_list(
+    status: str | None = typer.Option(None, "--status", help="Filter: pending / confirmed / rejected."),
+    since: str | None = typer.Option(None, "--since", help="ISO-8601 UTC lower bound (inclusive)."),
+    root: Path | None = typer.Option(None, "--root", help="Approvals queue root (default: <repo>/data/approvals)."),
+) -> None:
+    """List rows in the approval queue."""
+    from xtrade.approval import ApprovalQueue, ApprovalQueueError
+
+    if status is not None and status not in {"pending", "confirmed", "rejected"}:
+        raise _exit_config_error(
+            f"--status must be one of pending/confirmed/rejected, got {status!r}"
+        )
+    since_dt: dt.datetime | None = None
+    if since is not None:
+        try:
+            since_dt = dt.datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise _exit_config_error(f"--since must be ISO-8601, got {since!r}") from exc
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=dt.timezone.utc)
+    q = ApprovalQueue(_approvals_root(root))
+    try:
+        rows = q.list(status=status, since=since_dt)  # type: ignore[arg-type]
+    except ApprovalQueueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    if not rows:
+        typer.echo("(no approvals match)")
+        return
+    for r in rows:
+        typer.echo(
+            f"{r.id}  {r.status:<9}  mode={r.mode:<8}  "
+            f"{r.intent.side} {r.intent.quantity} {r.intent.symbol}  "
+            f"created={r.created_at.isoformat()}"
+        )
+
+
+@approve_app.command("confirm")
+def approve_confirm(
+    approval_id: str = typer.Argument(..., help="Approval row id (16 hex chars)."),
+    root: Path | None = typer.Option(None, "--root", help="Approvals queue root."),
+) -> None:
+    """Flip a pending row to `confirmed`."""
+    from xtrade.approval import ApprovalQueue, ApprovalQueueError
+
+    q = ApprovalQueue(_approvals_root(root))
+    try:
+        rec = q.patch(approval_id, status="confirmed")
+    except ApprovalQueueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    typer.echo(f"confirmed: {rec.id} at {rec.decided_at.isoformat() if rec.decided_at else '-'}")
+
+
+@approve_app.command("reject")
+def approve_reject(
+    approval_id: str = typer.Argument(..., help="Approval row id (16 hex chars)."),
+    reason: str = typer.Option("", "--reason", help="Optional reason string."),
+    root: Path | None = typer.Option(None, "--root", help="Approvals queue root."),
+) -> None:
+    """Flip a pending row to `rejected`."""
+    from xtrade.approval import ApprovalQueue, ApprovalQueueError
+
+    q = ApprovalQueue(_approvals_root(root))
+    try:
+        rec = q.patch(approval_id, status="rejected", reason=reason)
+    except ApprovalQueueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    typer.echo(f"rejected: {rec.id} reason={rec.reason!r}")
+
+
+# ---------------------------------------------------------------------------
+# `xtrade paper ...`
+# ---------------------------------------------------------------------------
+
+
+@paper_app.command("run")
+def paper_run(
+    strategy: str = typer.Option(..., "--strategy", help="SignalDrivenStrategy registry key."),
+    instrument: str = typer.Option(..., "--instrument", help="e.g. BTCUSDT-PERP.BINANCE"),
+    signals_from: Path = typer.Option(..., "--signals-from", help="SignalQueue root directory."),
+    bar: str = typer.Option("1m", "--bar", help="Bar spec, e.g. 1m, 5m, 1h."),
+    since: str | None = typer.Option(None, "--since", help="ISO-8601 lower bound (inclusive)."),
+    until: str | None = typer.Option(None, "--until", help="ISO-8601 upper bound (inclusive)."),
+    mode: str = typer.Option("auto", "--mode", help="auto / dry_run / manual."),
+    risk_config: Path | None = typer.Option(None, "--risk-config", help="Path to risk.yaml."),
+    starting_balance: int = typer.Option(1_000_000, "--starting-balance", help="Starting cash in settlement ccy."),
+    catalog_path: Path | None = typer.Option(None, "--catalog", help="Catalog root (default: <repo>/data/catalog)."),
+    approvals_root: Path | None = typer.Option(None, "--approvals-root", help="Approvals queue root."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Override the auto-generated run id."),
+) -> None:
+    """Drive a `SignalDrivenStrategy` over catalog bars + signals."""
+    from xtrade.observability import run_with_logging
+    from xtrade.risk import load_rules_from_yaml
+    from xtrade.strategy.runner import run_paper
+
+    if mode not in {"auto", "dry_run", "manual"}:
+        raise _exit_config_error(
+            f"--mode must be auto/dry_run/manual, got {mode!r}"
+        )
+    rules = []
+    if risk_config is not None:
+        try:
+            rules = load_rules_from_yaml(risk_config)
+        except (FileNotFoundError, ValueError) as exc:
+            raise _exit_config_error(str(exc)) from exc
+
+    def _parse_iso(text: str | None) -> dt.datetime | None:
+        if text is None:
+            return None
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise _exit_config_error(f"invalid ISO datetime {text!r}") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed
+
+    since_dt = _parse_iso(since)
+    until_dt = _parse_iso(until)
+    if since_dt is not None and until_dt is not None and until_dt <= since_dt:
+        raise _exit_config_error(f"--until ({until}) must be after --since ({since})")
+
+    try:
+        with run_with_logging(mode="paper", run_id=run_id) as ctx:
+            result = run_paper(
+                strategy_name=strategy,
+                catalog_path=catalog_path,
+                instrument_id=instrument,
+                bar=bar,
+                signals_root=signals_from,
+                since=since_dt,
+                until=until_dt,
+                approval_mode=mode,
+                risk_rules=rules,
+                starting_balance=starting_balance,
+                approvals_root=approvals_root,
+                run_id=ctx.run_id,
+                logs_root=ctx.logs_root,
+            )
+    except FileNotFoundError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    except ValueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    s = result.summary
+    typer.echo(f"run_id:             {s['run_id']}")
+    typer.echo(f"instrument:         {s['instrument_id']}")
+    typer.echo(f"bars loaded:        {s['bars_loaded']}")
+    typer.echo(f"signals consumed:   {s['signals_consumed']}")
+    typer.echo(f"intents generated:  {s['intents_generated']}")
+    typer.echo(f"risk rejected:      {s['risk_rejected']}")
+    typer.echo(f"approvals pending:  {s['approvals_pending']}")
+    typer.echo(f"approvals confirmed:{s['approvals_confirmed']}")
+    typer.echo(f"approvals dry_run:  {s['approvals_dry_run']}")
+    typer.echo(f"fills:              {s['fills']}")
+    typer.echo(f"final NAV (USD):    {s['final_nav_usd']}")
+    typer.echo(f"summary:            {result.summary_path}")
 
 
 def main() -> None:  # pragma: no cover - thin shim
