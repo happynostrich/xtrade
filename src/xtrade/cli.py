@@ -424,14 +424,102 @@ def live_health(
 
 @live_app.command("run")
 def live_run(
-    strategy: str = typer.Option(..., "--strategy"),
-    venues: str = typer.Option("binance_spot,hyperliquid", "--venues"),
+    instrument: str = typer.Option(
+        ..., "--instrument", help="Instrument id (e.g. BTCUSDT.BINANCE)."
+    ),
+    strategy: str = typer.Option(
+        "live_order_probe",
+        "--strategy",
+        help="Live strategy registry key (currently: live_order_probe).",
+    ),
+    side: str = typer.Option("BUY", "--side", help="BUY | SELL."),
+    quantity: str = typer.Option(
+        "0.001", "--quantity", help="Order size in instrument units."
+    ),
+    safety_multiplier: str = typer.Option(
+        "0.7",
+        "--safety-multiplier",
+        help=(
+            "BUY price = multiplier × bid; SELL price = ask / multiplier. "
+            "Default 0.7 matches Phase 0 C2-spot."
+        ),
+    ),
+    timeout: int = typer.Option(
+        60, "--timeout", help="Probe timeout (seconds)."
+    ),
+    venues_yaml: Path = typer.Option(
+        Path("config/venues.testnet.yaml"),
+        "--venues-yaml",
+        help="Path to the venues yaml (default: config/venues.testnet.yaml).",
+    ),
+    run_id: str | None = typer.Option(None, "--run-id", help="Override the auto run id."),
 ) -> None:
-    """Run a strategy live against testnets."""
-    _not_yet_implemented(
-        task="Phase 1 Task 6 — live testnet runner",
-        module="xtrade.node.factory + xtrade.strategies.base",
+    """Run a strategy live against testnets (places one far-from-market limit
+    order, awaits accept + cancel)."""
+    from decimal import Decimal, InvalidOperation
+
+    from xtrade.config import ConfigError, MissingCredentialError, load_venues
+    from xtrade.live.runner import available_live_strategies, run_live
+    from xtrade.node.factory import MainnetRefusedError
+
+    if strategy not in available_live_strategies():
+        raise _exit_config_error(
+            f"--strategy must be one of {available_live_strategies()}, "
+            f"got {strategy!r}"
+        )
+    if side.upper() not in ("BUY", "SELL"):
+        raise _exit_config_error(f"--side must be BUY or SELL, got {side!r}")
+    try:
+        qty = Decimal(quantity)
+        mult = Decimal(safety_multiplier)
+    except (InvalidOperation, ValueError) as exc:
+        raise _exit_config_error(f"--quantity/--safety-multiplier must be decimals: {exc}") from exc
+    if mult <= 0:
+        raise _exit_config_error("--safety-multiplier must be > 0")
+
+    try:
+        venues_cfg = load_venues(venues_yaml)
+    except (ConfigError, MissingCredentialError) as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    try:
+        result = run_live(
+            venues_cfg,
+            instrument_id=instrument,
+            strategy=strategy,
+            quantity=qty,
+            side=side.upper(),
+            safety_multiplier=mult,
+            timeout_s=float(timeout),
+            run_id=run_id,
+        )
+    except MainnetRefusedError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    s = result.summary
+    typer.echo(f"run_id:       {s['run_id']}")
+    typer.echo(f"summary:      {result.summary_path}")
+    typer.echo(f"instrument:   {s['instrument_id']}")
+    typer.echo(f"first quote:  {s['first_quote_iso']}")
+    order = s["order"]
+    typer.echo(
+        f"order:        accepted={order['accepted']} "
+        f"canceled={order['canceled']} rejected={order['rejected']}"
     )
+    if order["rejection_reason"]:
+        typer.echo(f"  reason:     {order['rejection_reason']}")
+    if s["account_snapshot"]:
+        typer.echo("account_snapshot:")
+        for row in s["account_snapshot"]:
+            typer.echo(
+                f"  {row['currency']}: total={row['total']} "
+                f"locked={row['locked']} free={row['free']}"
+            )
+
+    if not result.passed:
+        typer.echo("live run FAILED (order lifecycle incomplete).", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("live run PASSED.")
 
 
 def main() -> None:  # pragma: no cover - thin shim
