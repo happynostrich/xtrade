@@ -1,11 +1,11 @@
 """xtrade.strategies — shared strategy base + sample strategies.
 
-Phase 1 Task 5 will populate:
-  - base.XtradeStrategy: thin Nautilus `Strategy` subclass exposing
-    `self.mode` ("backtest" | "live") so a single subclass can run in
-    either context per the Phase 1 brief's "one strategy, two modes"
-    requirement (P6).
-  - demo_ema.DemoEmaCross: reusable form of the C6b EMA-cross strategy.
+Phase 1 Task 5:
+  - base.XtradeStrategy / XtradeStrategyConfig: thin Nautilus `Strategy`
+    subclass exposing `self.mode` ("backtest" | "live") so a single
+    subclass runs in either context (P6).
+  - demo_ema.DemoEmaCross / DemoEmaCrossConfig: reusable form of the
+    C6b EMA-cross.
 """
 
 __all__: list[str] = []

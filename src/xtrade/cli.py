@@ -255,16 +255,74 @@ def data_inspect(
 
 @backtest_app.command("run")
 def backtest_run(
-    strategy: str = typer.Option(..., "--strategy", help="e.g. demo_ema"),
+    strategy: str = typer.Option("demo_ema", "--strategy", help="Strategy registry key (e.g. demo_ema)."),
     instrument: str = typer.Option(..., "--instrument", help="e.g. BTCUSDT-PERP.BINANCE"),
-    since: str = typer.Option(..., "--since"),
-    until: str | None = typer.Option(None, "--until"),
+    bar: str = typer.Option("1m", "--bar", help="Bar spec, e.g. 1m, 5m, 1h"),
+    since: str | None = typer.Option(None, "--since", help="ISO-8601 lower bound (inclusive)."),
+    until: str | None = typer.Option(None, "--until", help="ISO-8601 upper bound (inclusive)."),
+    trade_size: str = typer.Option("0.010", "--trade-size", help="Trade size in instrument units."),
+    fast_ema_period: int = typer.Option(10, "--fast-ema", help="Fast EMA period."),
+    slow_ema_period: int = typer.Option(20, "--slow-ema", help="Slow EMA period."),
+    starting_balance: int = typer.Option(1_000_000, "--starting-balance", help="Starting cash in settlement ccy."),
+    catalog_path: Path | None = typer.Option(
+        None, "--catalog", help="Catalog root (default: <repo>/data/catalog)"
+    ),
+    run_id: str | None = typer.Option(None, "--run-id", help="Override the auto-generated run id."),
 ) -> None:
     """Run a strategy against catalog bars and write a summary."""
-    _not_yet_implemented(
-        task="Phase 1 Task 5 — backtest runner",
-        module="xtrade.strategies.demo_ema",
-    )
+    from decimal import Decimal, InvalidOperation
+
+    from xtrade.backtest.runner import available_strategies, run_backtest
+
+    if strategy not in available_strategies():
+        raise _exit_config_error(
+            f"--strategy must be one of {available_strategies()}, got {strategy!r}"
+        )
+
+    try:
+        ts = Decimal(trade_size)
+    except (InvalidOperation, ValueError) as exc:
+        raise _exit_config_error(f"--trade-size must be a decimal, got {trade_size!r}") from exc
+
+    if fast_ema_period >= slow_ema_period:
+        raise _exit_config_error(
+            f"--fast-ema ({fast_ema_period}) must be < --slow-ema ({slow_ema_period})"
+        )
+
+    since_ns = _parse_iso_to_ms(since) * 1_000_000 if since else None
+    until_ns = _parse_iso_to_ms(until, end_of_day=True) * 1_000_000 if until else None
+    if since_ns is not None and until_ns is not None and until_ns <= since_ns:
+        raise _exit_config_error(f"--until ({until}) must be after --since ({since})")
+
+    try:
+        result = run_backtest(
+            catalog_path=catalog_path,
+            instrument_id=instrument,
+            bar=bar,
+            strategy=strategy,
+            trade_size=ts,
+            fast_ema_period=fast_ema_period,
+            slow_ema_period=slow_ema_period,
+            since_ns=since_ns,
+            until_ns=until_ns,
+            starting_balance=starting_balance,
+            run_id=run_id,
+        )
+    except FileNotFoundError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    except ValueError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    s = result.summary
+    typer.echo(f"run_id:           {s['run_id']}")
+    typer.echo(f"instrument:       {s['instrument_id']}")
+    typer.echo(f"bar_type:         {s['bar_type']}")
+    typer.echo(f"bars loaded:      {s['bars_loaded']}")
+    if s["bars_loaded"]:
+        typer.echo(f"window:           {s['first_bar_ts_event']} .. {s['last_bar_ts_event']}")
+    typer.echo(f"orders filled:    {s['orders_filled']}")
+    typer.echo(f"positions opened: {s['positions_opened']}")
+    typer.echo(f"summary:          {result.summary_path}")
 
 
 # ---------------------------------------------------------------------------
