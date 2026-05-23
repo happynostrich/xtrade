@@ -481,3 +481,89 @@ def test_error_classes_share_root_base() -> None:
         ApprovalTimeoutError,
     ):
         assert issubclass(exc, LiveSignalError)
+
+
+# ---------------------------------------------------------------------------
+# Regression: dry_run audit must not satisfy a later manual run
+# ---------------------------------------------------------------------------
+#
+# Observed during the Phase 3 runbook end-to-end test: running
+# `signal-run --mode dry_run` first and then `signal-run --mode manual`
+# on the same signal caused the manual run to skip the approval gate and
+# submit straight to the venue (`approval.go=True` with no operator
+# action). Root cause was `ApprovalQueue.submit()` matching on
+# `intent.fingerprint()` only and returning the pre-existing
+# dry_run-confirmed row.
+
+
+def test_manual_mode_does_not_latch_onto_prior_dry_run_audit(
+    tmp_path: Path,
+) -> None:
+    signals = tmp_path / "signals"
+    _seed_signal(signals, direction="LONG", last_price="50000")
+    approvals = tmp_path / "approvals"
+
+    # 1) First run: dry_run. Writes an audit row with mode=dry_run,
+    # status=confirmed.
+    dry_executor, dry_calls = _make_executor()
+    run_live_signal(
+        venues_cfg=object(),
+        strategy_name="momentum_follow",
+        signals_root=signals,
+        instrument_id=SYMBOL,
+        approval_mode="dry_run",
+        approvals_root=approvals,
+        logs_root=tmp_path / "logs-dry",
+        live_executor=dry_executor,
+    )
+    assert not dry_calls
+    audit_rows = ApprovalQueue(approvals).list()
+    assert len(audit_rows) == 1
+    assert audit_rows[0].mode == "dry_run"
+    assert audit_rows[0].status == "confirmed"
+
+    # 2) Background worker flips the *manual* pending row only — proves
+    # the manual run wrote its own row (didn't just reuse the dry_run
+    # confirmation).
+    manual_executor, manual_calls = _make_executor()
+
+    def _confirm_manual_pending() -> None:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            q = ApprovalQueue(approvals)
+            pending = [r for r in q.list(status="pending") if r.mode == "manual"]
+            if pending:
+                q.patch(pending[0].id, status="confirmed")
+                return
+            time.sleep(0.05)
+
+    worker = threading.Thread(target=_confirm_manual_pending, daemon=True)
+    worker.start()
+
+    result = run_live_signal(
+        venues_cfg=object(),
+        strategy_name="momentum_follow",
+        signals_root=signals,
+        instrument_id=SYMBOL,
+        approval_mode="manual",
+        approvals_root=approvals,
+        logs_root=tmp_path / "logs-manual",
+        live_executor=manual_executor,
+        approval_timeout_s=10.0,
+        poll_interval_s=0.05,
+    )
+    worker.join(timeout=2.0)
+
+    assert len(manual_calls) == 1, "executor should fire after manual confirm"
+    assert result.summary["approval"]["mode"] == "manual"
+    assert result.summary["approval"]["status"] == "confirmed"
+    assert result.summary["approval"]["go"] is True
+    assert result.passed is True
+
+    # Queue now contains both: the dry_run audit (untouched) AND the
+    # manual decision.
+    rows = ApprovalQueue(approvals).list()
+    modes = sorted(r.mode for r in rows)
+    assert modes == ["dry_run", "manual"]
+    statuses_by_mode = {r.mode: r.status for r in rows}
+    assert statuses_by_mode == {"dry_run": "confirmed", "manual": "confirmed"}

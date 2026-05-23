@@ -25,10 +25,14 @@ leave a half-written file visible.
 
 Idempotency
 -----------
-Appending an intent whose `fingerprint()` already exists in the daily
-file does nothing (returns the existing record). This lets the runner
-re-emit the same intent across restarts without piling up duplicates
-in the approval queue.
+Appending an intent is idempotent **per `(fingerprint, mode)` pair** —
+re-submitting the same intent in the same gate mode returns the existing
+record, but the same intent submitted in a *different* mode produces a
+separate row. This is deliberate: a `dry_run` audit row must not satisfy
+a later `manual` approval, and vice versa. Operators using
+`xtrade approve confirm <id>` will see the queue contain the same `id`
+twice if a dry_run audit + manual decision coexist for one intent; the
+confirm/reject path always targets the unique `pending` row.
 """
 
 from __future__ import annotations
@@ -125,9 +129,12 @@ class ApprovalQueue:
         reason: str = "",
         now: dt.datetime | None = None,
     ) -> ApprovalRecord:
-        """Append `intent` (or return existing record if fingerprint clashes).
+        """Append `intent` (or return existing record if `(fingerprint, mode)` clashes).
 
-        Returns the resulting `ApprovalRecord`.
+        Idempotency is scoped to the `(fingerprint, mode)` pair so a
+        `dry_run` audit row never satisfies a later `manual` approval
+        (see the module docstring for why). Returns the resulting
+        `ApprovalRecord`.
         """
         when = now or dt.datetime.now(tz=dt.timezone.utc)
         day = when.astimezone(dt.timezone.utc).date()
@@ -136,8 +143,8 @@ class ApprovalQueue:
 
         rows = self._read_shard(shard)
         for row in rows:
-            if row.id == fp:
-                # Already enqueued — caller may re-emit safely.
+            if row.id == fp and row.mode == mode:
+                # Already enqueued in the same mode — caller may re-emit safely.
                 return row
 
         record = ApprovalRecord(
@@ -166,16 +173,20 @@ class ApprovalQueue:
             raise ApprovalQueueError(f"unknown status {status!r}")
         if status == "pending":
             raise ApprovalQueueError("patch() cannot set status back to pending")
+        # Same `approval_id` (= intent fingerprint) may legitimately appear
+        # twice when an operator has both a `dry_run` audit row and a
+        # `manual` pending row for the same intent. We always target the
+        # unique `pending` row — auto/dry_run rows are written as
+        # `confirmed` at create time and never transition.
+        seen_non_pending: list[str] = []
         for shard in sorted(self.root_dir.glob("*.jsonl")):
             rows = self._read_shard(shard)
             for idx, row in enumerate(rows):
                 if row.id != approval_id:
                     continue
                 if row.status != "pending":
-                    raise ApprovalQueueError(
-                        f"approval {approval_id} is already {row.status}; "
-                        f"cannot transition to {status}"
-                    )
+                    seen_non_pending.append(row.status)
+                    continue
                 when = now or dt.datetime.now(tz=dt.timezone.utc)
                 updated = dataclasses.replace(
                     row,
@@ -186,6 +197,11 @@ class ApprovalQueue:
                 rows[idx] = updated
                 self._write_shard_atomic(shard, rows)
                 return updated
+        if seen_non_pending:
+            raise ApprovalQueueError(
+                f"approval {approval_id} has no pending row to "
+                f"transition; existing rows are {seen_non_pending}"
+            )
         raise ApprovalQueueError(f"approval id {approval_id!r} not found")
 
     # ----- read side -------------------------------------------------------

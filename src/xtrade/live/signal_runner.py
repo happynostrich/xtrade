@@ -402,6 +402,11 @@ def _wait_for_manual_decision(
         for row in rows:
             if row.id != record_id:
                 continue
+            # Guard against latching onto a `dry_run` / `auto` audit row
+            # for the same intent — only a row written in manual mode
+            # counts as an operator decision.
+            if row.mode != "manual":
+                continue
             if row.status in {"confirmed", "rejected"}:
                 return ApprovalDecision(
                     go=row.status == "confirmed",

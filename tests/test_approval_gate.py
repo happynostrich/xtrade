@@ -274,3 +274,84 @@ def test_gate_pending_lists_only_pending(tmp_path: Path) -> None:
     gate.queue.patch(d1.record_id, status="confirmed", now=_t(h=11))
     pending = gate.pending()
     assert {r.id for r in pending} == {d2.record_id}
+
+
+# ---- Regression: mode-collision (dry_run audit + manual decision) -------
+#
+# Before this fix, `ApprovalQueue.submit()` was idempotent on
+# `intent.fingerprint()` alone — so a prior `dry_run` audit row with
+# `status=confirmed` was returned when manual mode submitted the same
+# intent, and `ApprovalGate.decide()` then read `record.status` and
+# returned `go=True` without ever blocking for an operator decision.
+# See `_wait_for_manual_decision` in `src/xtrade/live/signal_runner.py`
+# for the matching poll-side defence.
+
+
+def test_submit_creates_separate_row_per_mode(tmp_path: Path) -> None:
+    q = ApprovalQueue(tmp_path)
+    dry = q.submit(
+        _intent(), mode="dry_run", status="confirmed", decided_at=_t(), now=_t()
+    )
+    manual = q.submit(_intent(), mode="manual", now=_t(h=11))
+    assert dry.id == manual.id  # same intent → same fingerprint
+    assert dry.mode == "dry_run" and dry.status == "confirmed"
+    assert manual.mode == "manual" and manual.status == "pending"
+    rows = list(q)
+    assert len(rows) == 2, "dry_run audit + manual pending must coexist"
+
+
+def test_submit_stays_idempotent_within_same_mode(tmp_path: Path) -> None:
+    q = ApprovalQueue(tmp_path)
+    a = q.submit(_intent(), mode="manual", now=_t(h=10))
+    b = q.submit(_intent(), mode="manual", now=_t(h=11))
+    assert a == b
+    assert len(list(q)) == 1
+
+
+def test_patch_targets_pending_when_ids_collide(tmp_path: Path) -> None:
+    q = ApprovalQueue(tmp_path)
+    q.submit(
+        _intent(), mode="dry_run", status="confirmed", decided_at=_t(), now=_t()
+    )
+    manual = q.submit(_intent(), mode="manual", now=_t(h=11))
+    # `confirm <id>` (= patch) must flip the manual pending row, NOT
+    # blow up on the pre-existing dry_run-confirmed row.
+    updated = q.patch(manual.id, status="confirmed", now=_t(h=12))
+    assert updated.mode == "manual"
+    assert updated.status == "confirmed"
+    # dry_run audit row preserved untouched.
+    dry_after = [r for r in q if r.mode == "dry_run"]
+    assert len(dry_after) == 1
+    assert dry_after[0].status == "confirmed"
+    assert dry_after[0].decided_at == _t()  # original decided_at, not h=12
+
+
+def test_patch_errors_when_only_confirmed_rows_exist_for_id(
+    tmp_path: Path,
+) -> None:
+    q = ApprovalQueue(tmp_path)
+    rec = q.submit(
+        _intent(), mode="dry_run", status="confirmed", decided_at=_t(), now=_t()
+    )
+    with pytest.raises(ApprovalQueueError, match="no pending row"):
+        q.patch(rec.id, status="confirmed", now=_t(h=11))
+
+
+def test_gate_manual_does_not_consume_prior_dry_run_row(tmp_path: Path) -> None:
+    # 1) Operator runs `--mode dry_run` first.
+    dry_gate = ApprovalGate("dry_run", tmp_path)
+    dry_decision = dry_gate.decide(_intent(), now=_t(h=10))
+    assert dry_decision.status == "confirmed" and dry_decision.mode == "dry_run"
+    # 2) Operator re-runs the same intent in `--mode manual`. The manual
+    # gate must NOT latch onto the dry_run-confirmed row — it must write
+    # its own pending row and block.
+    manual_gate = ApprovalGate("manual", tmp_path)
+    manual_decision = manual_gate.decide(_intent(), now=_t(h=11))
+    assert not manual_decision.go
+    assert manual_decision.awaiting
+    assert manual_decision.status == "pending"
+    assert manual_decision.mode == "manual"
+    # Queue now contains both rows.
+    rows = list(manual_gate.queue)
+    modes = sorted(r.mode for r in rows)
+    assert modes == ["dry_run", "manual"]
