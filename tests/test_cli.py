@@ -336,6 +336,77 @@ def test_resolve_per_venue_yaml_returns_none_when_missing(tmp_path: Path) -> Non
     assert _resolve_per_venue_yaml("hyperliquid", base) is None
 
 
+def test_auto_resolve_default_passes_through_non_default(tmp_path: Path) -> None:
+    """Explicit --venues-yaml is never rewritten — only the gutted
+    `config/venues.testnet.yaml` default triggers the auto-resolve."""
+    from xtrade.cli import _auto_resolve_default_venues_yaml
+
+    explicit = tmp_path / "venues.custom.yaml"
+    explicit.write_text("# user-supplied\n")
+    assert (
+        _auto_resolve_default_venues_yaml(explicit, "BTCUSDT-PERP.BINANCE")
+        == explicit
+    )
+
+
+def test_auto_resolve_default_resolves_sibling_for_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the operator leaves --venues-yaml at the gutted default,
+    the CLI swaps in the per-venue sibling matching --instrument."""
+    from xtrade.cli import _DEFAULT_VENUES_YAML, _auto_resolve_default_venues_yaml
+
+    # `_DEFAULT_VENUES_YAML` is a relative path; resolve siblings via
+    # the working directory so the helper finds the per-venue file.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "venues.testnet.yaml").write_text("# pointer\n")
+    sibling = tmp_path / "config" / "venues.binance_futures.testnet.yaml"
+    sibling.write_text("binance:\n  environment: TESTNET\n")
+
+    resolved = _auto_resolve_default_venues_yaml(
+        _DEFAULT_VENUES_YAML, "BTCUSDT-PERP.BINANCE"
+    )
+    # `Path.exists()` resolution makes the helper return the same
+    # relative form it received its base from, so compare via resolve().
+    assert resolved.resolve() == sibling.resolve()
+
+
+def test_auto_resolve_default_falls_back_when_sibling_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If the per-venue sibling does not exist, return the default
+    unchanged so `load_venues` raises its normal ConfigError."""
+    from xtrade.cli import _DEFAULT_VENUES_YAML, _auto_resolve_default_venues_yaml
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "venues.testnet.yaml").write_text("# pointer\n")
+    # No `venues.hyperliquid.testnet.yaml` created.
+
+    resolved = _auto_resolve_default_venues_yaml(
+        _DEFAULT_VENUES_YAML, "BTC-USD-PERP.HYPERLIQUID"
+    )
+    assert resolved == _DEFAULT_VENUES_YAML
+
+
+def test_auto_resolve_default_passes_through_unknown_instrument(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An instrument id whose venue can't be inferred (no `.BINANCE`
+    or `.HYPERLIQUID` suffix) does not rewrite the default — the
+    caller's `load_venues` will surface the original ConfigError."""
+    from xtrade.cli import _DEFAULT_VENUES_YAML, _auto_resolve_default_venues_yaml
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+
+    resolved = _auto_resolve_default_venues_yaml(
+        _DEFAULT_VENUES_YAML, "FOO.BAR-UNKNOWN"
+    )
+    assert resolved == _DEFAULT_VENUES_YAML
+
+
 def test_live_health_rejects_instrument_outside_requested_venues(tmp_path: Path) -> None:
     """If the operator passes --venues binance_futures but --instrument
     BTCUSDT.BINANCE (a spot id), we fail loudly instead of silently

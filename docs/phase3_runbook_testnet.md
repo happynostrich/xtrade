@@ -29,9 +29,14 @@ here.
    - `config/venues.hyperliquid.testnet.yaml`
 
    The pointer file `config/venues.testnet.yaml` is intentionally
-   gutted to a comment-only stub and must **not** be passed via
-   `--venues-yaml` directly; it exists only so `xtrade live health`
-   (with no `--venues-yaml`) can auto-discover the per-venue siblings.
+   gutted to a comment-only stub. It exists so `xtrade live health`
+   (with no `--venues-yaml`) can auto-discover the per-venue siblings,
+   and so `xtrade live run` / `live signal-run` can auto-resolve the
+   correct sibling from `--instrument` when `--venues-yaml` is left at
+   the default. Passing the pointer to `--venues-yaml` *directly* (i.e.
+   `--venues-yaml config/venues.testnet.yaml`) is rejected by
+   `load_venues` because the file has no venues — pass one of the
+   per-venue siblings instead, or omit the flag entirely.
 2. Whatever env vars the per-venue yamls reference, exported in the
    shell. For the default layout that's
    `BINANCE_SPOT_TESTNET_API_KEY` / `..._API_SECRET`,

@@ -398,6 +398,42 @@ def _resolve_per_venue_yaml(venue_key: str, base_yaml: Path) -> Path | None:
     return candidate if candidate.exists() else None
 
 
+_DEFAULT_VENUES_YAML = Path("config/venues.testnet.yaml")
+
+
+def _auto_resolve_default_venues_yaml(venues_yaml: Path, instrument_id: str) -> Path:
+    """For single-instrument commands, swap the gutted pointer default
+    in for the per-venue sibling that matches `instrument_id`.
+
+    `config/venues.testnet.yaml` is intentionally gutted — it carries
+    no venues; it exists only so `xtrade live health` can auto-discover
+    per-venue siblings. Single-venue commands (`live run`,
+    `live signal-run`) otherwise fail on the default invocation with
+    "venues.testnet.yaml has no venues". Mapping the instrument id
+    → venue key → sibling yaml lets the operator skip --venues-yaml
+    in the common case.
+
+    Returns `venues_yaml` unchanged when:
+      - The operator supplied an explicit non-default path
+      - The instrument id is unparseable (let load_venues raise)
+      - The sibling yaml does not exist (let load_venues raise)
+    """
+    if venues_yaml != _DEFAULT_VENUES_YAML:
+        return venues_yaml
+    try:
+        venue_key = _venue_for_instrument(instrument_id)
+    except typer.BadParameter:
+        return venues_yaml
+    per_venue = _resolve_per_venue_yaml(venue_key, venues_yaml)
+    if per_venue is None:
+        return venues_yaml
+    typer.echo(
+        f"note: --venues-yaml defaulted; using {per_venue} for {instrument_id}.",
+        err=True,
+    )
+    return per_venue
+
+
 def _narrow_venues_cfg(cfg, venue_keys: list[str]):
     """Return a new VenuesConfig containing only the requested venue keys.
 
@@ -652,7 +688,11 @@ def live_run(
     venues_yaml: Path = typer.Option(
         Path("config/venues.testnet.yaml"),
         "--venues-yaml",
-        help="Path to the venues yaml (default: config/venues.testnet.yaml).",
+        help=(
+            "Path to the venues yaml. If left at the default, the CLI "
+            "auto-resolves to the per-venue sibling matching --instrument "
+            "(e.g. config/venues.binance_futures.testnet.yaml)."
+        ),
     ),
     run_id: str | None = typer.Option(None, "--run-id", help="Override the auto run id."),
 ) -> None:
@@ -680,6 +720,7 @@ def live_run(
     if mult <= 0:
         raise _exit_config_error("--safety-multiplier must be > 0")
 
+    venues_yaml = _auto_resolve_default_venues_yaml(venues_yaml, instrument)
     try:
         venues_cfg = load_venues(venues_yaml)
     except (ConfigError, MissingCredentialError) as exc:
@@ -753,7 +794,11 @@ def live_signal_run(
     venues_yaml: Path = typer.Option(
         Path("config/venues.testnet.yaml"),
         "--venues-yaml",
-        help="Path to the venues yaml (default: config/venues.testnet.yaml).",
+        help=(
+            "Path to the venues yaml. If left at the default, the CLI "
+            "auto-resolves to the per-venue sibling matching --instrument "
+            "(e.g. config/venues.binance_futures.testnet.yaml)."
+        ),
     ),
     safety_multiplier: str = typer.Option(
         "0.7",
@@ -821,6 +866,7 @@ def live_signal_run(
         except (FileNotFoundError, ValueError) as exc:
             raise _exit_config_error(str(exc)) from exc
 
+    venues_yaml = _auto_resolve_default_venues_yaml(venues_yaml, instrument)
     try:
         venues_cfg = load_venues(venues_yaml)
     except (ConfigError, MissingCredentialError) as exc:
