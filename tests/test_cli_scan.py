@@ -25,7 +25,7 @@ from xtrade.data.catalog import bar_type_for, open_catalog, parse_bar_spec, writ
 from xtrade.research.signals import Signal, SignalQueue
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()  # click >= 8.4 dropped mix_stderr kwarg; stderr is always separate now
 
 
 _MIN_NS = 60 * 1_000_000_000

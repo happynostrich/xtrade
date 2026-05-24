@@ -171,6 +171,19 @@ def run_supervisor(
     the return value of a long-lived process — use `journalctl`
     instead).
     """
+    # Phase 5 Task A5 — third lock. When the operator hands the
+    # supervisor a real venues_cfg (production path), we re-assert the
+    # mainnet unlock ritual *before* any side effects (cursor open,
+    # systemd ready notification, etc). Tests that inject a stub
+    # `live_executor` typically pass `venues_cfg=None` and bypass this
+    # check; that's intentional — Lock 3 only guards real-venue runs.
+    if config.venues_cfg is not None:
+        from xtrade.node.factory import _assert_testnet_only
+        from xtrade.live.mainnet_unlock import assert_mainnet_unlock
+
+        _assert_testnet_only(config.venues_cfg)
+        assert_mainnet_unlock(config.venues_cfg)
+
     if stop_event is None:
         stop_event = threading.Event()
     now = clock or (lambda: dt.datetime.now(tz=dt.timezone.utc))

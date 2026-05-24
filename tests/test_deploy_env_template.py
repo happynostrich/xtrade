@@ -62,12 +62,22 @@ def test_env_template_keys_are_blank_or_invalid_placeholder() -> None:
 
 
 def test_env_template_warns_against_mainnet() -> None:
+    """Phase 5 Task A5 replaced the legacy `XTRADE_ALLOW_MAINNET` placeholder
+    with the unlock-token ritual. Whatever the env template uses, the
+    mainnet-related line must be commented out by default so a fresh
+    deployment is testnet-only without operator intervention.
+    """
     text = ENV_FILE.read_text()
-    assert "XTRADE_ALLOW_MAINNET" in text
-    # The mainnet line must be commented out by default.
+    assert "XTRADE_MAINNET_UNLOCK_TOKEN" in text
     for line in text.splitlines():
-        if "XTRADE_ALLOW_MAINNET" in line and "=" in line and not line.lstrip().startswith("#"):
-            raise AssertionError(f"mainnet flag must be commented out, got: {line!r}")
+        if (
+            "XTRADE_MAINNET_UNLOCK_TOKEN" in line
+            and "=" in line
+            and not line.lstrip().startswith("#")
+        ):
+            raise AssertionError(
+                f"mainnet unlock token must be commented out, got: {line!r}"
+            )
 
 
 def test_env_template_has_no_obvious_secret() -> None:

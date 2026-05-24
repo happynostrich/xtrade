@@ -222,8 +222,14 @@ def run_live(
     # Eagerly refuse mainnet so callers see the error before any log
     # directory is created or TradingNode is constructed.
     from xtrade.node.factory import _assert_testnet_only
+    from xtrade.live.mainnet_unlock import assert_mainnet_unlock
 
     _assert_testnet_only(venues_cfg)
+    # Phase 5 Task A5 — third lock (defense in depth). Lock 1 above will
+    # hard-reject any mainnet routing today, so this call is a no-op in
+    # the current Phase 5 codebase; it becomes load-bearing once Phase 6
+    # relaxes Lock 1 conditional on the unlock ritual.
+    assert_mainnet_unlock(venues_cfg)
 
     # TradingNode.__init__ captures `asyncio.get_event_loop()` and the
     # engines latch onto that specific loop forever. Constructing the

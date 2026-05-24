@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 from xtrade.cli import app
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()  # click >= 8.4 dropped mix_stderr kwarg; stderr is always separate now
 
 
 # ---------------------------------------------------------------------------

@@ -201,8 +201,11 @@ def probe(
     # Eagerly refuse mainnet so the caller sees the error before any
     # log dir is created or TradingNode is constructed.
     from xtrade.node.factory import _assert_testnet_only
+    from xtrade.live.mainnet_unlock import assert_mainnet_unlock
 
     _assert_testnet_only(venues_cfg)
+    # Phase 5 Task A5 — third lock (see runner.run_live for rationale).
+    assert_mainnet_unlock(venues_cfg)
 
     repo_root = Path(__file__).resolve().parents[3]
     logs_root_p = Path(logs_root) if logs_root is not None else (repo_root / "logs")

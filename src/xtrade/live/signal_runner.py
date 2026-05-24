@@ -213,6 +213,25 @@ def run_live_signal(
         Override for the testnet hop. Default is Phase 1's `run_live`;
         tests inject a dummy callable. Signature must match `run_live`.
     """
+    # Phase 5 Task A5 — third lock. Refuse mainnet routing before any
+    # log dir is created or the signal queue is opened. Mirrors the
+    # double-call pattern in runner.run_live / health.probe: Lock 1
+    # (testnet-only) followed by Lock 3 (unlock ritual).
+    #
+    # We only run the locks when `venues_cfg` is a real `VenuesConfig`
+    # — offline tests inject a sentinel object together with a stub
+    # `live_executor`, and the eventual real `run_live` (production
+    # path) re-asserts both locks itself, so this fast-path check is
+    # purely a "fail before side effects" optimisation.
+    from xtrade.config import VenuesConfig as _VenuesConfig
+
+    if isinstance(venues_cfg, _VenuesConfig):
+        from xtrade.node.factory import _assert_testnet_only
+        from xtrade.live.mainnet_unlock import assert_mainnet_unlock
+
+        _assert_testnet_only(venues_cfg)
+        assert_mainnet_unlock(venues_cfg)
+
     # ---- 1. Resolve filesystem layout ----------------------------------
     repo_root = Path(__file__).resolve().parents[3]
     logs_root_p = Path(logs_root) if logs_root is not None else (repo_root / "logs")
