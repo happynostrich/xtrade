@@ -1,0 +1,48 @@
+[Unit]
+Description=xtrade always-on testnet supervisor
+Documentation=file://${OPT_XTRADE}/current/docs/phase4_brief.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${XTRADE_USER}
+Group=${XTRADE_GROUP}
+EnvironmentFile=${ETC_XTRADE}/env
+WorkingDirectory=${OPT_XTRADE}/current
+ExecStart=${OPT_XTRADE}/.venv/bin/xtrade live supervise --config ${ETC_XTRADE}/supervisor.yaml
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+SuccessExitStatus=0 143
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xtrade.supervisor
+
+# Resource limits (cgroup v2) — see docs/phase4_brief.md §2 T2
+MemoryMax=1500M
+MemorySwapMax=0
+CPUQuota=80%
+TasksMax=512
+OOMScoreAdjust=500
+
+# Filesystem + capability hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+ReadWritePaths=${VAR_XTRADE} /run/xtrade
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

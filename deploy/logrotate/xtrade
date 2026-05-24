@@ -1,0 +1,16 @@
+# xtrade run-log rotation. Per Phase 4 brief §2 T3:
+#   - rotate logs/<run-id>/run.log at 100 MB / 7 days
+#   - leave *_summary.json untouched (audit trail)
+#   - leave data/signals/, data/approvals/ untouched (audit trail)
+/var/lib/xtrade/logs/*/run.log {
+    size 100M
+    rotate 7
+    daily
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su xtrade xtrade
+    create 0640 xtrade xtrade
+}

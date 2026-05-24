@@ -36,6 +36,9 @@ MANIFEST
 venv/
 env/
 ENV/
+# Phase 4 deploy/env/ contains the env template, not a virtualenv
+!deploy/env/
+!deploy/env/**
 
 # Tooling / IDE
 .vscode/

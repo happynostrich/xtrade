@@ -1,0 +1,13 @@
+[Unit]
+Description=xtrade research scanner timer (every 5 minutes)
+Documentation=file://${OPT_XTRADE}/current/docs/phase4_brief.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Persistent=true
+Unit=xtrade-scanner.service
+
+[Install]
+WantedBy=timers.target

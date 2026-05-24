@@ -1,0 +1,45 @@
+[Unit]
+Description=xtrade openclaw inbound webhook receiver (localhost only)
+Documentation=file://${OPT_XTRADE}/current/docs/phase4_brief.md
+After=network.target
+
+[Service]
+Type=simple
+User=${XTRADE_USER}
+Group=${XTRADE_GROUP}
+EnvironmentFile=${ETC_XTRADE}/env
+WorkingDirectory=${OPT_XTRADE}/current
+ExecStart=${OPT_XTRADE}/.venv/bin/xtrade bridge serve --bind 127.0.0.1 --port 18080 --approvals-root ${VAR_XTRADE}/approvals
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xtrade.bridge
+
+MemoryMax=200M
+MemorySwapMax=0
+CPUQuota=20%
+TasksMax=64
+OOMScoreAdjust=400
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+ReadWritePaths=${VAR_XTRADE}/approvals
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
