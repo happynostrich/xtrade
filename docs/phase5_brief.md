@@ -82,7 +82,7 @@ B4. **信号融合 prototype**：把 ML 模型的预测分数作为 `xtrade.stra
 | A3  | scanner 结构化日志 | scanner 入口 `xtrade scan run` 在 start / per-instrument / summary / error 处发 `scanner.*` 事件；`journalctl -t xtrade.scanner -o cat \| jq -c '.event'` 至少能看到 `scanner.run.start` + `scanner.signal.emitted`*N + `scanner.run.complete`；事件 schema 由 `tests/test_log_event.py` 风格的正则审计加锁。 |
 | A4  | 磁盘容量告警 | `xtrade.ops.collect_status` 新增 `disk` 字段：`{"path":"/var/lib/xtrade","used_pct":63,"free_bytes":...,"warning":false}`；supervisor 每 iteration 启动前调 `_check_disk_room()`，≥ 90% 时主动写 sentinel 并发 `supervisor.disk.exhausted` event 进入 paused；阈值在 supervisor.yaml 中可配置（默认 80 / 90）。 |
 | A5  | mainnet 第三锁 | `xtrade.live.config` 在解析任意 `venue_endpoint` 时若识别为 mainnet（非 testnet domain 列表外）即调 `_assert_mainnet_unlock(env)`：要求 `XTRADE_MAINNET_UNLOCK_TOKEN` 与 `/etc/xtrade/mainnet_unlock` 文件首行 strip 后**完全相等**且文件 mode ≤ `0400 root:root`，否则 raise；offline test 覆盖 4 路径（无 env / 无文件 / 内容不等 / 文件权限松）。 |
-| A6  | installer hardening | `scripts/phase4/install_vps.sh` 在 2026-05-24 VPS 首装实测中暴露两个阻断 bug：(a) `uv python install 3.12` 默认把工具链放到 `~/.local/share/uv/python`；安装脚本以 root 运行时落到 `/root/.local/...`（mode `0550 root:root`），`xtrade` 用户无法 traverse，systemd 启动 `/opt/xtrade/.venv/bin/xtrade` 报 `status=203/EXEC Permission denied`；(b) installer 从未 seed `/etc/xtrade/supervisor.yaml`（systemd unit 指向该文件），首装后 `xtrade-supervisor.service` 启动即报 `FileNotFoundError`。Phase 5 A6 任务：(1) 改 installer 显式 `UV_PYTHON_INSTALL_DIR=/opt/uv/python` 并 `chmod -R a+rX /opt/uv`；(2) 在 `config/` 下新增 `supervisor.example.yaml`，installer 把它 seed 到 `/etc/xtrade/supervisor.yaml`（0640 root:xtrade，已存在则跳过）；(3) installer 末尾的 post-start health check 失败时打印明确"下一步操作"提示（"edit /etc/xtrade/env + /etc/xtrade/supervisor.yaml then `systemctl restart xtrade-supervisor`"）；(4) `scripts/phase5/01_check_phase5_prereqs.sh` 增加 venv interpreter 可执行性的 self-test（`sudo -u xtrade /opt/xtrade/.venv/bin/python3 -c 'print("ok")'`）。 |
+| A6  | installer hardening | `scripts/phase4/install_vps.sh` 在 2026-05-24 VPS 首装实测中暴露 3 个阻断 bug + 1 个噪音 bug：(a) `uv python install 3.12` 默认把工具链放到 `~/.local/share/uv/python`，root 运行落到 `/root/.local/...`（mode `0550 root:root`），`xtrade` 用户 traverse 失败 → systemd `status=203/EXEC Permission denied`；(b) installer 从未 seed `/etc/xtrade/supervisor.yaml`（systemd unit 指向该文件），supervisor 启动即 `FileNotFoundError`；(c) Bug a 修好后进入 import 阶段，vectorbt → numba `caching.py:423` 报 `cannot cache function 'set_seed_nb': no locator available`，因 systemd `ProtectSystem=strict` + `ProtectHome=yes` 把 in-tree / user-wide / `NUMBA_CACHE_DIR` 三条 cache 路径全堵死；(d) restart 风暴刷 journal。Phase 5 A6 任务：(1) installer 显式 `UV_PYTHON_INSTALL_DIR=/opt/uv/python` 并 `chmod -R a+rX /opt/uv`；(2) 新增 `config/supervisor.example.yaml`，installer seed 到 `/etc/xtrade/supervisor.yaml`（`0640 root:xtrade`）；(3) installer 创建 `/var/lib/xtrade/numba_cache`（`0750 xtrade:xtrade`）并把 `NUMBA_CACHE_DIR=/var/lib/xtrade/numba_cache` + `HOME=/var/lib/xtrade` 追加到 `/etc/xtrade/env`；(4) installer 末尾 post-start health check 失败时打印明确"下一步操作"提示；(5) systemd unit 加 `StartLimitBurst=5` + `StartLimitIntervalSec=120` 抑制 restart 风暴；(6) `scripts/phase5/01_check_phase5_prereqs.sh` 增加 venv interpreter 可执行性 + vectorbt import 两个 self-test。 |
 
 ### Track B — ML / news 信号探索
 
@@ -230,7 +230,7 @@ VPS 文件布局新增：
 
 #### Task A6 —— installer hardening（2026-05-24 VPS 首装实测发现）
 
-**背景**：2026-05-24 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 发现 2 个阻断 bug，使 `xtrade-supervisor.service` 在 `systemctl enable --now` 后无法启动；手动绕过 ~30 分钟才上线。这两个问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
+**背景**：2026-05-24 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 4 个 bug（其中 3 个是阻断性的），使 `xtrade-supervisor.service` 在 `systemctl enable --now` 后无法启动；手动绕过 ~1 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
 
 **Bug 1 — uv Python 工具链落在 `/root` 下，xtrade 用户无法 traverse**
 
@@ -261,6 +261,20 @@ VPS 文件布局新增：
 
 - 现象：`xtrade-supervisor.service` 在 EACCES 阶段每 10 秒重启，60 次后被 systemd 限流；journal 被刷满。
 - 修复：unit 增加 `StartLimitBurst=5` + `StartLimitIntervalSec=120`，超过即 `failed` 不再 restart，避免 5 分钟内刷 30 条 EACCES。
+
+**Bug 4 — numba JIT cache locator 在 systemd 沙箱下无落点**
+
+- 现象：Bug 1 修好后，supervisor 进入 Python 模块加载阶段崩在 vectorbt → numba `caching.py:423`：`RuntimeError: cannot cache function 'set_seed_nb': no locator available for file '/opt/xtrade/.venv/lib/python3.12/site-packages/vectorbt/utils/random_.py'`。
+- 根因：numba 的 locator 链依次尝试 in-tree（venv 站点目录，`ProtectSystem=strict` 只读 → fail）→ user-wide `~/.numba`（`ProtectHome=yes` + `HOME` 不可写 → fail）→ `NUMBA_CACHE_DIR`（未 set → fail）。三条路径全堵死即 raise。
+- 修复：
+  1. installer 在 `/var/lib/xtrade` 下创建 `numba_cache/`（owner `xtrade:xtrade`，mode `0750`）；
+  2. installer 在 seed 后的 `/etc/xtrade/env` 追加默认行（已存在则跳过）：
+     ```
+     NUMBA_CACHE_DIR=/var/lib/xtrade/numba_cache
+     HOME=/var/lib/xtrade
+     ```
+     `HOME` 兜底其他库（如 polars / matplotlib）的 `~/.cache` 探测；`/var/lib/xtrade` 本来就在 `ReadWritePaths=`。
+  3. `scripts/phase5/01_check_phase5_prereqs.sh` 增加 import-side-effect self-test：`sudo -u xtrade NUMBA_CACHE_DIR=/var/lib/xtrade/numba_cache HOME=/var/lib/xtrade /opt/xtrade/.venv/bin/python3 -c 'import vectorbt; print("vbt ok")'`。
 
 **验收**
 
