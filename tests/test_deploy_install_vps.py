@@ -22,7 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = [
     REPO_ROOT / "scripts" / "phase4" / "install_vps.sh",
     REPO_ROOT / "scripts" / "phase4" / "uninstall_vps.sh",
+    REPO_ROOT / "scripts" / "phase4" / "01_drill_sigkill.sh",
+    REPO_ROOT / "scripts" / "phase4" / "03_drill_oom.sh",
+    REPO_ROOT / "scripts" / "phase4" / "04_drill_network.sh",
     REPO_ROOT / "scripts" / "phase4" / "05_smoke_postdeploy.sh",
+    REPO_ROOT / "scripts" / "phase4" / "06_drill_openclaw_outage.sh",
 ]
 
 
