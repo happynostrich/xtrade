@@ -44,6 +44,7 @@ paper_app = typer.Typer(help="Phase 3 paper-mode runs: signals + RiskGate + Appr
 approve_app = typer.Typer(help="Phase 3 approval queue: list / confirm / reject pending intents.")
 risk_app = typer.Typer(help="Phase 3.5 risk calibration: pre-flight strategy + risk.yaml without I/O.")
 bridge_app = typer.Typer(help="Phase 4 openclaw bridge: localhost callback receiver.")
+ops_app = typer.Typer(help="Phase 4 ops: status / pause / resume / kill (pure file-system; safe to call when supervisor is dead).")
 
 app.add_typer(data_app, name="data")
 app.add_typer(backtest_app, name="backtest")
@@ -54,6 +55,7 @@ app.add_typer(paper_app, name="paper")
 app.add_typer(approve_app, name="approve")
 app.add_typer(risk_app, name="risk")
 app.add_typer(bridge_app, name="bridge")
+app.add_typer(ops_app, name="ops")
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1110,162 @@ def bridge_serve(
     finally:
         server.server_close()
         typer.echo("bridge: stopped.", err=True)
+
+
+# ---------------------------------------------------------------------------
+# `xtrade ops ...` (Phase 4 — operator runtime status + pause/resume/kill)
+# ---------------------------------------------------------------------------
+
+
+@ops_app.command("status")
+def ops_status(
+    sentinel_path: Path = typer.Option(
+        Path("/run/xtrade/paused.flag"),
+        "--sentinel-path",
+        help="Sentinel flag path (paused if file exists).",
+    ),
+    signals_root: Path = typer.Option(
+        Path("/var/lib/xtrade/signals"),
+        "--signals-root",
+        help="Signals queue root (used only for path bundling — current implementation reads the cursor instead).",
+    ),
+    cursor_path: Path = typer.Option(
+        Path("/var/lib/xtrade/signals/.cursor"),
+        "--cursor-path",
+        help="SignalConsumer cursor file (JSON; format defined in xtrade.strategy.cursor).",
+    ),
+    approvals_root: Path = typer.Option(
+        Path("/var/lib/xtrade/approvals"),
+        "--approvals-root",
+        help="ApprovalQueue root (daily jsonl shards).",
+    ),
+    logs_root: Path = typer.Option(
+        Path("/var/lib/xtrade/logs"),
+        "--logs-root",
+        help="Run logs root: scanned for the most recent <run-id>/live_signal_summary.json.",
+    ),
+    supervisor_unit: str = typer.Option(
+        "xtrade-supervisor.service",
+        "--supervisor-unit",
+        help="systemd unit name probed via `systemctl show`. Reports 'unknown' if systemctl is unavailable.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit JSON instead of the human one-liner + multi-line summary.",
+    ),
+) -> None:
+    """Print supervisor + bridge + sentinel status as a one-liner + detail block (or JSON).
+
+    Pure file-system reads (plus an optional `systemctl show` probe);
+    safe to call when xtrade-supervisor.service is dead or crash-looping.
+    """
+    from xtrade.ops import (
+        OpsPaths,
+        collect_status,
+        render_status_json,
+        render_status_text,
+    )
+
+    paths = OpsPaths(
+        signals_root=signals_root,
+        approvals_root=approvals_root,
+        cursor_path=cursor_path,
+        sentinel_path=sentinel_path,
+        logs_root=logs_root,
+        supervisor_unit=supervisor_unit,
+    )
+    status = collect_status(paths)
+    if json_output:
+        typer.echo(render_status_json(status))
+    else:
+        typer.echo(render_status_text(status))
+
+
+@ops_app.command("pause")
+def ops_pause(
+    reason: str = typer.Option("", "--reason", help="Free-text reason recorded in the sentinel body."),
+    sentinel_path: Path = typer.Option(
+        Path("/run/xtrade/paused.flag"),
+        "--sentinel-path",
+        help="Sentinel flag path (default: /run/xtrade/paused.flag on VPS).",
+    ),
+) -> None:
+    """Park the supervisor: it will keep handling callbacks but submit no new venue orders.
+
+    Writes ``/run/xtrade/paused.flag`` atomically. Idempotent — re-pausing
+    while paused updates `paused_at` + `reason` in place.
+    """
+    from xtrade.live.sentinel import Sentinel
+
+    sentinel = Sentinel(sentinel_path)
+    body = sentinel.pause(reason=reason)
+    typer.echo(
+        f"paused: at={body['paused_at']} reason={body['reason']!r} path={sentinel_path}",
+    )
+
+
+@ops_app.command("resume")
+def ops_resume(
+    sentinel_path: Path = typer.Option(
+        Path("/run/xtrade/paused.flag"),
+        "--sentinel-path",
+        help="Sentinel flag path (default: /run/xtrade/paused.flag on VPS).",
+    ),
+) -> None:
+    """Clear the sentinel so the supervisor begins submitting orders again.
+
+    Idempotent — resuming an already-resumed sentinel returns OK with a
+    `not_paused` note.
+    """
+    from xtrade.live.sentinel import Sentinel
+
+    sentinel = Sentinel(sentinel_path)
+    removed = sentinel.resume()
+    if removed:
+        typer.echo(f"resumed: removed {sentinel_path}")
+    else:
+        typer.echo(f"resumed: not_paused (no sentinel at {sentinel_path})")
+
+
+@ops_app.command("kill")
+def ops_kill(
+    supervisor_unit: str = typer.Option(
+        "xtrade-supervisor.service",
+        "--supervisor-unit",
+        help="systemd unit to stop (default: xtrade-supervisor.service).",
+    ),
+    confirm: bool = typer.Option(
+        False, "--yes", "-y", help="Required: skip interactive confirmation.",
+    ),
+) -> None:
+    """Stop the supervisor unit via `systemctl stop`.
+
+    Requires `--yes`: this is intentionally a destructive action and we
+    refuse to make it a one-keystroke mistake. Install_vps.sh wires a
+    polkit rule so the xtrade group can stop xtrade-* units without sudo.
+    """
+    import subprocess as _subprocess
+
+    if not confirm:
+        raise _exit_config_error(
+            "refusing to stop a unit without --yes; this is a destructive op",
+        )
+    try:
+        proc = _subprocess.run(
+            ["systemctl", "stop", supervisor_unit],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise _exit_config_error(f"systemctl not found on PATH: {exc}") from exc
+    except _subprocess.TimeoutExpired as exc:
+        raise _exit_config_error(f"systemctl stop timed out after 15s: {exc}") from exc
+
+    if proc.returncode != 0:
+        typer.echo(proc.stderr.strip(), err=True)
+        raise typer.Exit(code=proc.returncode)
+    typer.echo(f"stopped: {supervisor_unit}")
 
 
 # ---------------------------------------------------------------------------
