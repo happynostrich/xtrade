@@ -68,9 +68,10 @@ class ApprovalRecord:
     decided_at: dt.datetime | None
     reason: str
     mode: str
+    dispatch: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "id": self.id,
             "intent": self.intent.to_dict(),
             "status": self.status,
@@ -83,6 +84,9 @@ class ApprovalRecord:
             "reason": self.reason,
             "mode": self.mode,
         }
+        if self.dispatch is not None:
+            out["dispatch"] = self.dispatch
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ApprovalRecord":
@@ -107,6 +111,7 @@ class ApprovalRecord:
             decided_at=decided_at,
             reason=data.get("reason", ""),
             mode=data.get("mode", "manual"),
+            dispatch=data.get("dispatch"),
         )
 
 
@@ -203,6 +208,62 @@ class ApprovalQueue:
                 f"transition; existing rows are {seen_non_pending}"
             )
         raise ApprovalQueueError(f"approval id {approval_id!r} not found")
+
+    def annotate_dispatch_success(
+        self,
+        approval_id: str,
+        *,
+        result: dict[str, Any],
+    ) -> ApprovalRecord:
+        """Attach a successful bridge dispatch outcome to the row.
+
+        Targets the unique row whose `id == approval_id`. If multiple rows
+        share the id (dry_run audit + manual pending coexisting), the
+        `pending` row is preferred so a successful dispatch updates the
+        row a human is waiting on.
+        """
+        return self._annotate_dispatch(
+            approval_id, payload={"ok": True, **result}
+        )
+
+    def annotate_dispatch_failure(
+        self,
+        approval_id: str,
+        *,
+        result: dict[str, Any],
+    ) -> ApprovalRecord:
+        """Attach a terminal dispatch failure annotation; status untouched."""
+        return self._annotate_dispatch(
+            approval_id, payload={"ok": False, **result}
+        )
+
+    def _annotate_dispatch(
+        self,
+        approval_id: str,
+        *,
+        payload: dict[str, Any],
+    ) -> ApprovalRecord:
+        for shard in sorted(self.root_dir.glob("*.jsonl")):
+            rows = self._read_shard(shard)
+            target_idx: int | None = None
+            for idx, row in enumerate(rows):
+                if row.id != approval_id:
+                    continue
+                if row.status == "pending":
+                    target_idx = idx
+                    break
+                if target_idx is None:
+                    target_idx = idx
+            if target_idx is None:
+                continue
+            row = rows[target_idx]
+            updated = dataclasses.replace(row, dispatch=dict(payload))
+            rows[target_idx] = updated
+            self._write_shard_atomic(shard, rows)
+            return updated
+        raise ApprovalQueueError(
+            f"approval id {approval_id!r} not found"
+        )
 
     # ----- read side -------------------------------------------------------
 
