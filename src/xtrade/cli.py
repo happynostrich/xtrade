@@ -943,6 +943,82 @@ def live_signal_run(
     typer.echo("live signal-run PASSED.")
 
 
+@live_app.command("supervise")
+def live_supervise(
+    config_path: Path = typer.Option(
+        ..., "--config", help="Path to supervisor.yaml."
+    ),
+    max_iterations: int | None = typer.Option(
+        None,
+        "--max-iterations",
+        help="Stop after N poll iterations (smoke / drill only).",
+    ),
+    log_level: str = typer.Option(
+        "INFO", "--log-level", help="Root logger level for the supervisor."
+    ),
+) -> None:
+    """Run the always-on Phase 4 supervisor loop.
+
+    The supervisor polls `signals_root` for new signals and drives each
+    one through strategy → RiskGate → ApprovalGate. Manual approvals
+    are dispatched to openclaw via `OpenclawBridge` (built from
+    `OPENCLAW_*` env vars when present, else None). The loop runs
+    forever until SIGINT/SIGTERM, which systemd sends on `systemctl
+    stop xtrade-supervisor`.
+    """
+    import logging
+    import os
+    import signal as _signal
+    import threading
+    from typing import Any
+
+    from xtrade.bridge.openclaw_webhook import BridgeConfigError, OpenclawBridge
+    from xtrade.live.supervisor import (
+        SupervisorIterationResult,
+        load_supervisor_config,
+        run_supervisor,
+    )
+
+    logging.basicConfig(
+        level=log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    bridge: OpenclawBridge | None = None
+    if "OPENCLAW_GATEWAY" in os.environ and "OPENCLAW_SHARED_SECRET" in os.environ:
+        try:
+            bridge = OpenclawBridge.from_env(os.environ)
+        except BridgeConfigError as exc:
+            raise _exit_config_error(f"OpenclawBridge config: {exc}") from exc
+
+    try:
+        config = load_supervisor_config(config_path, bridge=bridge)
+    except FileNotFoundError as exc:
+        raise _exit_config_error(f"supervisor config not found: {exc}") from exc
+    except KeyError as exc:
+        raise _exit_config_error(f"supervisor.yaml missing key: {exc}") from exc
+
+    stop_event = threading.Event()
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        typer.echo(f"supervisor: received signal {signum}; draining...", err=True)
+        stop_event.set()
+
+    _signal.signal(_signal.SIGINT, _on_signal)
+    _signal.signal(_signal.SIGTERM, _on_signal)
+
+    results: list[SupervisorIterationResult] = run_supervisor(
+        config,
+        stop_event=stop_event,
+        max_iterations=max_iterations,
+    )
+    typer.echo(
+        f"supervisor: stopped after {len(results)} iterations; "
+        f"submitted={sum(r.intents_submitted for r in results)}, "
+        f"parked_manual={sum(r.intents_parked_manual for r in results)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # `xtrade scan ...` (Phase 2 — opportunity discovery / scanner layer)
 # ---------------------------------------------------------------------------
