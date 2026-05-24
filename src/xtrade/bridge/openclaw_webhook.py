@@ -36,6 +36,7 @@ from xtrade.bridge.schema import (
     build_payload,
     scrub_payload_for_secrets,
 )
+from xtrade.obs import emit_event
 
 
 log = logging.getLogger("xtrade.bridge.out")
@@ -198,7 +199,14 @@ class OpenclawBridge:
                 error=f"secret-scrub: {exc}",
                 response_excerpt=None,
             )
-            log.error("bridge.dispatch refused: %s id=%s", exc, record.id)
+            emit_event(
+                log,
+                "bridge.out.refused",
+                level=logging.ERROR,
+                id=record.id,
+                reason="secret-scrub",
+                error=str(exc),
+            )
             return result
 
         target = f"{self._gateway}/plugins/webhooks/xtrade"
@@ -223,9 +231,13 @@ class OpenclawBridge:
                 last_excerpt = resp.text[:200] if resp.text else None
                 if 200 <= resp.status_code < 300:
                     elapsed = time.monotonic() - start
-                    log.info(
-                        "bridge.dispatch ok id=%s status=%d attempts=%d elapsed=%.3fs",
-                        record.id, resp.status_code, attempts, elapsed,
+                    emit_event(
+                        log,
+                        "bridge.out.dispatch_ok",
+                        id=record.id,
+                        status=resp.status_code,
+                        attempts=attempts,
+                        elapsed_s=round(elapsed, 3),
                     )
                     return self._record_success(
                         record,
@@ -245,16 +257,26 @@ class OpenclawBridge:
                 last_excerpt = None
 
             if idx < len(self._backoffs) - 1:
-                log.warning(
-                    "bridge.dispatch retry id=%s attempt=%d error=%s sleep=%.1fs",
-                    record.id, attempts, last_error, backoff,
+                emit_event(
+                    log,
+                    "bridge.out.dispatch_retry",
+                    level=logging.WARNING,
+                    id=record.id,
+                    attempt=attempts,
+                    error=last_error,
+                    sleep_s=round(backoff, 3),
                 )
                 self._sleep(backoff)
 
         elapsed = time.monotonic() - start
-        log.error(
-            "bridge.dispatch failed id=%s attempts=%d last=%s elapsed=%.3fs",
-            record.id, attempts, last_error, elapsed,
+        emit_event(
+            log,
+            "bridge.out.dispatch_failed",
+            level=logging.ERROR,
+            id=record.id,
+            attempts=attempts,
+            last_error=last_error,
+            elapsed_s=round(elapsed, 3),
         )
         return self._record_failure(
             record,

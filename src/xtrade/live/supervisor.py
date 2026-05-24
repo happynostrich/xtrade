@@ -66,6 +66,7 @@ from xtrade.approval.gate import ApprovalDecision, ApprovalGate, ApprovalMode
 from xtrade.approval.queue import ApprovalRecord
 from xtrade.bridge.openclaw_webhook import OpenclawBridge
 from xtrade.live.sentinel import Sentinel
+from xtrade.obs import emit_event
 from xtrade.research.signals import Signal, SignalQueue
 from xtrade.risk import RiskGate, RiskRule
 from xtrade.strategy.base import AccountSnapshot, load_strategy
@@ -204,14 +205,14 @@ def run_supervisor(
         if rec.mode == "manual"
     }
 
-    log.info(
-        "supervisor.start instrument=%s mode=%s strategy=%s "
-        "signals_root=%s pending=%d",
-        config.instrument_id,
-        config.approval_mode,
-        config.strategy_name,
-        config.signals_root,
-        len(pending),
+    emit_event(
+        log,
+        "supervisor.start",
+        instrument=config.instrument_id,
+        mode=config.approval_mode,
+        strategy=config.strategy_name,
+        signals_root=config.signals_root,
+        pending=len(pending),
     )
 
     results: list[SupervisorIterationResult] = []
@@ -235,6 +236,13 @@ def run_supervisor(
                 now=now,
             )
         except Exception as exc:  # noqa: BLE001
+            emit_event(
+                log,
+                "supervisor.iteration.crash",
+                level=logging.ERROR,
+                iteration=iteration,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             log.exception("supervisor.iteration.crash iteration=%d", iteration)
             iter_result = SupervisorIterationResult(
                 iteration=iteration,
@@ -252,11 +260,12 @@ def run_supervisor(
         # Wait one poll interval, but wake early if stop_event fires.
         stop_event.wait(config.poll_interval_s)
 
-    log.info(
-        "supervisor.stop iterations=%d submitted=%d parked=%d",
-        len(results),
-        sum(r.intents_submitted for r in results),
-        sum(r.intents_parked_manual for r in results),
+    emit_event(
+        log,
+        "supervisor.stop",
+        iterations=len(results),
+        submitted=sum(r.intents_submitted for r in results),
+        parked=sum(r.intents_parked_manual for r in results),
     )
     if config.bridge is not None:
         config.bridge.close()
@@ -305,10 +314,13 @@ def _supervisor_iteration(
     )
 
     if paused:
-        log.warning(
-            "supervisor.iteration.paused iteration=%d "
-            "(promoted=%d rejected=%d)",
-            iteration, promoted, rejected,
+        emit_event(
+            log,
+            "supervisor.iteration.paused",
+            level=logging.WARNING,
+            iteration=iteration,
+            promoted=promoted,
+            rejected=rejected,
         )
         return SupervisorIterationResult(
             iteration=iteration,
@@ -335,6 +347,13 @@ def _supervisor_iteration(
         try:
             intents = _strategy_intents_for(strategy, sig, config.instrument_id)
         except Exception as exc:  # noqa: BLE001
+            emit_event(
+                log,
+                "supervisor.strategy.crash",
+                level=logging.ERROR,
+                signal=sig.dedup_key(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
             log.exception(
                 "supervisor.strategy.crash signal=%s err=%s",
                 sig.dedup_key(), exc,
@@ -354,6 +373,13 @@ def _supervisor_iteration(
                     pending=pending,
                 )
             except Exception as exc:  # noqa: BLE001
+                emit_event(
+                    log,
+                    "supervisor.intent.crash",
+                    level=logging.ERROR,
+                    intent=intent.fingerprint(),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 log.exception(
                     "supervisor.intent.crash intent=%s err=%s",
                     intent.fingerprint(), exc,
@@ -424,18 +450,22 @@ def _route_intent(
     """Return one of: 'submitted', 'parked', 'rejected', 'dry_run'."""
     risk_decision = risk_gate.check(intent, _empty_account(config.instrument_id))
     if not risk_decision.approve:
-        log.info(
-            "supervisor.intent.risk_rejected intent=%s reasons=%s",
-            intent.fingerprint(), risk_decision.reasons,
+        emit_event(
+            log,
+            "supervisor.intent.risk_rejected",
+            intent=intent.fingerprint(),
+            reasons=list(risk_decision.reasons),
         )
         return "rejected"
 
     decision: ApprovalDecision = approval_gate.decide(intent, now=now())
 
     if decision.mode == "dry_run":
-        log.info(
-            "supervisor.intent.dry_run intent=%s record=%s",
-            intent.fingerprint(), decision.record_id,
+        emit_event(
+            log,
+            "supervisor.intent.dry_run",
+            intent=intent.fingerprint(),
+            record=decision.record_id,
         )
         return "dry_run"
 
@@ -447,9 +477,11 @@ def _route_intent(
     if decision.awaiting:
         record = approval_gate.queue.get(decision.record_id)
         if record is None:
-            log.error(
-                "supervisor.intent.parked but queue.get() missed record=%s",
-                decision.record_id,
+            emit_event(
+                log,
+                "supervisor.intent.queue_miss",
+                level=logging.ERROR,
+                record=decision.record_id,
             )
             return "rejected"
         if decision.record_id in pending:
@@ -464,9 +496,11 @@ def _route_intent(
         if bridge is not None:
             _dispatch_via_bridge(bridge=bridge, record=record, slot=slot)
         else:
-            log.info(
-                "supervisor.intent.parked record=%s (no bridge configured)",
-                decision.record_id,
+            emit_event(
+                log,
+                "supervisor.intent.parked",
+                record=decision.record_id,
+                bridge="absent",
             )
         return "parked"
     return "rejected"
@@ -505,10 +539,19 @@ def _drain_pending_decisions(
                     slot.intent, live_executor=live_executor, config=config
                 )
                 promoted += 1
-                log.info(
-                    "supervisor.pending.promoted record=%s", record_id,
+                emit_event(
+                    log,
+                    "supervisor.pending.promoted",
+                    record=record_id,
                 )
             except Exception as exc:  # noqa: BLE001
+                emit_event(
+                    log,
+                    "supervisor.pending.submit_failed",
+                    level=logging.ERROR,
+                    record=record_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 log.exception(
                     "supervisor.pending.submit_failed record=%s err=%s",
                     record_id, exc,
@@ -517,9 +560,11 @@ def _drain_pending_decisions(
         elif row.status == "rejected":
             pending.pop(record_id, None)
             rejected += 1
-            log.info(
-                "supervisor.pending.rejected record=%s reason=%s",
-                record_id, row.reason,
+            emit_event(
+                log,
+                "supervisor.pending.rejected",
+                record=record_id,
+                reason=row.reason,
             )
     return promoted, rejected
 
@@ -541,14 +586,25 @@ def _dispatch_via_bridge(
     try:
         result = bridge.dispatch(record)
         slot.dispatched = True
-        log.info(
-            "supervisor.bridge.dispatch record=%s ok=%s status=%s attempts=%d",
-            record.id, result.ok, result.status_code, result.attempts,
+        emit_event(
+            log,
+            "supervisor.bridge.dispatch",
+            record=record.id,
+            ok=result.ok,
+            status=result.status_code,
+            attempts=result.attempts,
         )
     except Exception as exc:  # noqa: BLE001
         # Bridge dispatch is supposed to be terminal-safe (it annotates
         # the queue on failure). Anything escaping here is a bug — log
         # but do not crash the supervisor.
+        emit_event(
+            log,
+            "supervisor.bridge.dispatch.unhandled",
+            level=logging.ERROR,
+            record=record.id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         log.exception(
             "supervisor.bridge.dispatch.unhandled record=%s err=%s",
             record.id, exc,

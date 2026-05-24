@@ -72,6 +72,7 @@ from socketserver import ThreadingMixIn
 from typing import Any, Callable
 
 from xtrade.approval.queue import ApprovalQueue, ApprovalQueueError, ApprovalRecord
+from xtrade.obs import emit_event
 
 
 log = logging.getLogger("xtrade.bridge.in")
@@ -159,27 +160,23 @@ def run_inbound_server(config: InboundConfig) -> None:
     """
     server = build_server(config)
     bind_host, bind_port = server.server_address[:2]
-    log.info(
-        json.dumps(
-            {
-                "event": "bridge.in.start",
-                "bind": bind_host,
-                "port": bind_port,
-                "approvals_root": str(config.approvals_root),
-                "ttl_s": config.ttl_s,
-            },
-            sort_keys=True,
-        )
+    emit_event(
+        log,
+        "bridge.in.start",
+        bind=bind_host,
+        port=bind_port,
+        approvals_root=str(config.approvals_root),
+        ttl_s=config.ttl_s,
     )
     try:
         server.serve_forever()
     finally:
         server.server_close()
-        log.info(
-            json.dumps(
-                {"event": "bridge.in.stop", "bind": bind_host, "port": bind_port},
-                sort_keys=True,
-            )
+        emit_event(
+            log,
+            "bridge.in.stop",
+            bind=bind_host,
+            port=bind_port,
         )
 
 
@@ -391,8 +388,8 @@ class _InboundHandler(BaseHTTPRequestHandler):
 
     def _audit(self, **fields: Any) -> None:
         """Emit one structured json log line per request."""
-        fields = {"event": "bridge.in.request", **{k: v for k, v in fields.items() if v is not None}}
-        log.info(json.dumps(fields, sort_keys=True))
+        clean = {k: v for k, v in fields.items() if v is not None}
+        emit_event(log, "bridge.in.request", **clean)
 
 
 # ---------------------------------------------------------------------------
