@@ -82,6 +82,7 @@ B4. **信号融合 prototype**：把 ML 模型的预测分数作为 `xtrade.stra
 | A3  | scanner 结构化日志 | scanner 入口 `xtrade scan run` 在 start / per-instrument / summary / error 处发 `scanner.*` 事件；`journalctl -t xtrade.scanner -o cat \| jq -c '.event'` 至少能看到 `scanner.run.start` + `scanner.signal.emitted`*N + `scanner.run.complete`；事件 schema 由 `tests/test_log_event.py` 风格的正则审计加锁。 |
 | A4  | 磁盘容量告警 | `xtrade.ops.collect_status` 新增 `disk` 字段：`{"path":"/var/lib/xtrade","used_pct":63,"free_bytes":...,"warning":false}`；supervisor 每 iteration 启动前调 `_check_disk_room()`，≥ 90% 时主动写 sentinel 并发 `supervisor.disk.exhausted` event 进入 paused；阈值在 supervisor.yaml 中可配置（默认 80 / 90）。 |
 | A5  | mainnet 第三锁 | `xtrade.live.config` 在解析任意 `venue_endpoint` 时若识别为 mainnet（非 testnet domain 列表外）即调 `_assert_mainnet_unlock(env)`：要求 `XTRADE_MAINNET_UNLOCK_TOKEN` 与 `/etc/xtrade/mainnet_unlock` 文件首行 strip 后**完全相等**且文件 mode ≤ `0400 root:root`，否则 raise；offline test 覆盖 4 路径（无 env / 无文件 / 内容不等 / 文件权限松）。 |
+| A6  | installer hardening | `scripts/phase4/install_vps.sh` 在 2026-05-24 VPS 首装实测中暴露两个阻断 bug：(a) `uv python install 3.12` 默认把工具链放到 `~/.local/share/uv/python`；安装脚本以 root 运行时落到 `/root/.local/...`（mode `0550 root:root`），`xtrade` 用户无法 traverse，systemd 启动 `/opt/xtrade/.venv/bin/xtrade` 报 `status=203/EXEC Permission denied`；(b) installer 从未 seed `/etc/xtrade/supervisor.yaml`（systemd unit 指向该文件），首装后 `xtrade-supervisor.service` 启动即报 `FileNotFoundError`。Phase 5 A6 任务：(1) 改 installer 显式 `UV_PYTHON_INSTALL_DIR=/opt/uv/python` 并 `chmod -R a+rX /opt/uv`；(2) 在 `config/` 下新增 `supervisor.example.yaml`，installer 把它 seed 到 `/etc/xtrade/supervisor.yaml`（0640 root:xtrade，已存在则跳过）；(3) installer 末尾的 post-start health check 失败时打印明确"下一步操作"提示（"edit /etc/xtrade/env + /etc/xtrade/supervisor.yaml then `systemctl restart xtrade-supervisor`"）；(4) `scripts/phase5/01_check_phase5_prereqs.sh` 增加 venv interpreter 可执行性的 self-test（`sudo -u xtrade /opt/xtrade/.venv/bin/python3 -c 'print("ok")'`）。 |
 
 ### Track B — ML / news 信号探索
 
@@ -226,6 +227,46 @@ VPS 文件布局新增：
 - venue 是否 mainnet 的判定：复用 `xtrade.config._VALID_BINANCE_ENVIRONMENTS` + 增加 hyperliquid mainnet 域名列表（明确常量，便于 review）。
 - `xtrade.live.run_supervisor` / `xtrade.live.run_live_signal` 在 `node` 构造之前调用 unlock check；保留 Phase 3 双锁优先于 Phase 5 第三锁的执行顺序（保留原 error message 风格）。
 - 验收：`tests/test_mainnet_unlock.py` 覆盖 4 路径（无 env / 无文件 / 内容不等 / 文件 mode 0644）+ no-op 路径（纯 testnet）；不在 git 中写真实 unlock token。
+
+#### Task A6 —— installer hardening（2026-05-24 VPS 首装实测发现）
+
+**背景**：2026-05-24 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 发现 2 个阻断 bug，使 `xtrade-supervisor.service` 在 `systemctl enable --now` 后无法启动；手动绕过 ~30 分钟才上线。这两个问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
+
+**Bug 1 — uv Python 工具链落在 `/root` 下，xtrade 用户无法 traverse**
+
+- 现象：`/opt/xtrade/.venv/bin/python3` → `python` → `/root/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12`；`/root` 默认 mode `0550 root:root`，`xtrade` 用户 traverse 失败；systemd 启动报 `status=203/EXEC Failed to execute /opt/xtrade/.venv/bin/xtrade: Permission denied`。
+- 根因：`install_vps.sh` line 117 调用 `uv python install 3.12` 时未设置 `UV_PYTHON_INSTALL_DIR`，uv 默认写到调用者的 `~/.local/share/uv/python`（root 即 `/root/...`）。
+- 修复：
+  ```bash
+  # install_vps.sh 中：
+  export UV_PYTHON_INSTALL_DIR=/opt/uv/python
+  install -d -m 0755 -o root -g root "$UV_PYTHON_INSTALL_DIR"
+  "$UV_BIN" python install 3.12 >/dev/null
+  "$UV_BIN" venv --python 3.12 "$OPT_XTRADE/.venv"
+  ...
+  chmod -R a+rX /opt/uv "$OPT_XTRADE/.venv"
+  ```
+- 兜底：installer 最后增加 self-test：`sudo -u "$XTRADE_USER" "$OPT_XTRADE/.venv/bin/python3" -c 'print("ok")'`，失败立即报错指向修复 PATH。
+
+**Bug 2 — `/etc/xtrade/supervisor.yaml` 从未被 seed**
+
+- 现象：systemd unit `ExecStart=...xtrade live supervise --config /etc/xtrade/supervisor.yaml`；该文件不存在，supervisor 启动即报 `FileNotFoundError`。
+- 根因：`install_vps.sh` line 133–142 的 config seed 循环只覆盖 `venues.*.yaml`、`universe.yaml`、`risk.yaml`，没有 supervisor.yaml；仓库 `config/` 下也没有 `supervisor.example.yaml`。
+- 修复：
+  1. 新增 `config/supervisor.example.yaml`，包含完整 schema 注释（`instrument_id` / `strategy_name` / `approval_mode` / 各路径 / `venues_yaml` / `risk_yaml` / `poll_interval_s` / `venue_timeout_s` / `safety_multiplier`）。
+  2. installer seed 列表加入 `supervisor.example.yaml`，目标路径 `/etc/xtrade/supervisor.yaml`（mode `0640 root:xtrade`，已存在则跳过）。
+  3. installer 末尾若 supervisor 启动失败，打印明确提示：`"EDIT /etc/xtrade/env (set BINANCE_TESTNET_API_KEY etc.) AND /etc/xtrade/supervisor.yaml (set instrument_id + venues_yaml), then run: sudo systemctl restart xtrade-supervisor"`。
+
+**Bug 3（轻量）— Restart 风暴噪音**
+
+- 现象：`xtrade-supervisor.service` 在 EACCES 阶段每 10 秒重启，60 次后被 systemd 限流；journal 被刷满。
+- 修复：unit 增加 `StartLimitBurst=5` + `StartLimitIntervalSec=120`，超过即 `failed` 不再 restart，避免 5 分钟内刷 30 条 EACCES。
+
+**验收**
+
+- `tests/test_install_vps_script.py`（新增）：lint installer 脚本中存在 `UV_PYTHON_INSTALL_DIR` export 与 `supervisor.example.yaml` seed 行；regex 锁住路径不再为 `~/.local`。
+- VPS 复现：在干净 OpenCloudOS 9.x VPS 上 `bash install_vps.sh --release-tarball ...` 一次跑通到 `xtrade-supervisor.service` `active` 状态（除 `/etc/xtrade/env` 凭据外无需任何手动步骤）；命令日志归档到 `docs/phase5_results.md` §A6。
+- 旧 VPS（已踩到 bug 的本机）：可选回归测试，`uninstall_vps.sh` 完全清理后再走一遍 installer。
 
 ### Track B
 
