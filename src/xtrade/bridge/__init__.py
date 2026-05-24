@@ -13,6 +13,11 @@ Submodules
 - :mod:`xtrade.bridge.inbound` — localhost HTTP server (Task 3, pending).
 """
 
+from xtrade.bridge.inbound import (
+    InboundConfig,
+    build_server,
+    run_inbound_server,
+)
 from xtrade.bridge.openclaw_webhook import (
     BridgeConfigError,
     DispatchResult,
@@ -31,8 +36,11 @@ __all__ = [
     "BridgePayload",
     "CallbackUrls",
     "DispatchResult",
+    "InboundConfig",
     "OpenclawBridge",
     "SecretLeakError",
     "build_payload",
+    "build_server",
+    "run_inbound_server",
     "scrub_payload_for_secrets",
 ]

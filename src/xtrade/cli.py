@@ -43,6 +43,7 @@ strategy_app = typer.Typer(help="Phase 3 strategy plugin registry: list and desc
 paper_app = typer.Typer(help="Phase 3 paper-mode runs: signals + RiskGate + ApprovalGate + BacktestEngine.")
 approve_app = typer.Typer(help="Phase 3 approval queue: list / confirm / reject pending intents.")
 risk_app = typer.Typer(help="Phase 3.5 risk calibration: pre-flight strategy + risk.yaml without I/O.")
+bridge_app = typer.Typer(help="Phase 4 openclaw bridge: localhost callback receiver.")
 
 app.add_typer(data_app, name="data")
 app.add_typer(backtest_app, name="backtest")
@@ -52,6 +53,7 @@ app.add_typer(strategy_app, name="strategy")
 app.add_typer(paper_app, name="paper")
 app.add_typer(approve_app, name="approve")
 app.add_typer(risk_app, name="risk")
+app.add_typer(bridge_app, name="bridge")
 
 
 # ---------------------------------------------------------------------------
@@ -1017,6 +1019,95 @@ def live_supervise(
         f"submitted={sum(r.intents_submitted for r in results)}, "
         f"parked_manual={sum(r.intents_parked_manual for r in results)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# `xtrade bridge ...` (Phase 4 — openclaw inbound callback receiver)
+# ---------------------------------------------------------------------------
+
+
+@bridge_app.command("serve")
+def bridge_serve(
+    approvals_root: Path = typer.Option(
+        ..., "--approvals-root", help="Path to the ApprovalQueue root dir (writable)."
+    ),
+    bind: str = typer.Option(
+        "127.0.0.1", "--bind", help="Loopback address to bind (127.0.0.1 / ::1)."
+    ),
+    port: int = typer.Option(
+        18080, "--port", help="TCP port (loopback only).",
+    ),
+    ttl_s: int = typer.Option(
+        900, "--ttl-s", help="Reject callbacks older than this many seconds.",
+    ),
+    log_level: str = typer.Option(
+        "INFO", "--log-level", help="Root logger level for the bridge.",
+    ),
+) -> None:
+    """Run the openclaw inbound webhook receiver (Phase 4 / T4).
+
+    Reads `OPENCLAW_INBOUND_SECRET` from the environment (typically
+    sourced via systemd `EnvironmentFile=/etc/xtrade/env`). Refuses to
+    bind any non-loopback address — the systemd unit additionally sets
+    `IPAddressDeny=any + IPAddressAllow=127.0.0.0/8`.
+    """
+    import logging
+    import os
+    import signal as _signal
+    from typing import Any
+
+    from xtrade.bridge.inbound import InboundConfig, build_server
+
+    logging.basicConfig(
+        level=log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    secret = os.environ.get("OPENCLAW_INBOUND_SECRET", "").strip()
+    if not secret:
+        raise _exit_config_error(
+            "OPENCLAW_INBOUND_SECRET must be set (e.g. via /etc/xtrade/env)."
+        )
+
+    try:
+        config = InboundConfig(
+            approvals_root=approvals_root,
+            shared_secret=secret,
+            bind=bind,
+            port=port,
+            ttl_s=ttl_s,
+        )
+    except ValueError as exc:
+        raise _exit_config_error(f"inbound config: {exc}") from exc
+
+    try:
+        server = build_server(config)
+    except OSError as exc:
+        raise _exit_config_error(f"bind {bind}:{port} failed: {exc}") from exc
+
+    bind_host, bind_port = server.server_address[:2]
+    typer.echo(
+        f"bridge: listening on http://{bind_host}:{bind_port} "
+        f"(approvals={approvals_root}, ttl={ttl_s}s)",
+        err=True,
+    )
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        typer.echo(f"bridge: signal {signum} received; shutting down...", err=True)
+        # `shutdown()` is the documented thread-safe stop hook for
+        # ThreadingHTTPServer; it joins the serve_forever loop.
+        import threading
+
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    _signal.signal(_signal.SIGINT, _on_signal)
+    _signal.signal(_signal.SIGTERM, _on_signal)
+
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        typer.echo("bridge: stopped.", err=True)
 
 
 # ---------------------------------------------------------------------------
