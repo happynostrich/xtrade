@@ -1,0 +1,25 @@
+# Off-venue static facts about tradable instruments — Phase 6 Task T3.
+#
+# Keyed by `<contract_symbol>.<venue>`. Every numeric field is parsed
+# as `Decimal` by `xtrade.instruments.meta.load_instrument_meta`;
+# scientific notation works (`1.187e10`) but the underscore form
+# below is preferred for readability.
+#
+# `mark_source`:
+#   - `oracle`       — venue's pre-IPO oracle feed (Binance USDS-M
+#                      `SPCXUSDT` pre-IPO uses this).
+#   - `spot_anchor`  — venue's spot-anchored perpetual feed (used
+#                      after IPO; switch by hand-editing this yaml).
+#
+# Sanity check (scanner-side): if the venue's `exchangeInfo` returns
+# a `shares_outstanding` (or a public source you scrape) that differs
+# from the value here by more than 5 %, the scanner raises
+# `InstrumentMetaStaleError` and refuses to start until the yaml is
+# refreshed.
+
+SPCXUSDT-PERP.BINANCE:
+  shares_outstanding: 11_870_000_000   # SpaceX reference shares (user-provided)
+  min_qty: '0.001'                     # placeholder; calibrated from exchangeInfo at scanner start
+  qty_step: '0.001'
+  tick_size: '0.01'
+  mark_source: oracle                  # flip to `spot_anchor` after IPO
