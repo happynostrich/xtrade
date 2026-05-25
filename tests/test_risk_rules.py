@@ -288,6 +288,18 @@ def test_load_rules_from_yaml_empty_yields_empty_list(tmp_path: Path) -> None:
     assert load_rules_from_yaml(yaml_path) == []
 
 
+def test_load_rules_from_yaml_accepts_str_path(tmp_path: Path) -> None:
+    """Regression: supervisor passes `raw["risk_yaml"]` (a str from
+    yaml.safe_load) directly; we must accept both str and Path. Found
+    on VPS first-install 2026-05-25: `AttributeError: 'str' object has
+    no attribute 'exists'`.
+    """
+    yaml_path = tmp_path / "risk.yaml"
+    yaml_path.write_text("max_notional_per_order_usd: 100\n")
+    rules = load_rules_from_yaml(str(yaml_path))  # str, not Path
+    assert len(rules) == 1
+
+
 def test_example_risk_yaml_is_loadable() -> None:
     """`config/risk.example.yaml` should be a valid load."""
     repo_root = Path(__file__).resolve().parents[1]

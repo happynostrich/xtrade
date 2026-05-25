@@ -244,7 +244,7 @@ class MaxDrawdownPct(RiskRule):
 # ---------------------------------------------------------------------------
 
 
-def load_rules_from_yaml(path: Path) -> list[RiskRule]:
+def load_rules_from_yaml(path: str | Path) -> list[RiskRule]:
     """Build the rule list from `config/risk.example.yaml` shape.
 
     Expected keys (all optional; missing → rule not installed):
@@ -255,6 +255,7 @@ def load_rules_from_yaml(path: Path) -> list[RiskRule]:
     """
     import yaml  # local import: yaml is already a dependency
 
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"risk config not found: {path}")
     raw = yaml.safe_load(path.read_text()) or {}
