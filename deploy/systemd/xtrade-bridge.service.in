@@ -17,7 +17,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=xtrade.bridge
 
-MemoryMax=200M
+# A6 Bug 5: 200M was too tight — xtrade CLI eagerly imports vectorbt +
+# numba just to dispatch to `bridge serve`, peaking ~275M RSS before the
+# server is ready. Bumped to 512M (still half the supervisor cap).
+MemoryMax=512M
 MemorySwapMax=0
 CPUQuota=20%
 TasksMax=64
@@ -31,7 +34,10 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 NoNewPrivileges=true
-ReadWritePaths=${VAR_XTRADE}/approvals
+# A6 Bug 3: numba_cache must be writable so vectorbt's eager numba
+# imports can persist their JIT cache. Kept narrow (two subdirs, not the
+# whole VAR_XTRADE tree) so the bridge still can't touch signals/ etc.
+ReadWritePaths=${VAR_XTRADE}/approvals ${VAR_XTRADE}/numba_cache
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_UNIX

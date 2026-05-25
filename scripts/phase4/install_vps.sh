@@ -92,6 +92,10 @@ install -d -m 0700 -o "$XTRADE_USER" -g "$XTRADE_GROUP" "$VAR_XTRADE/signals"
 install -d -m 0700 -o "$XTRADE_USER" -g "$XTRADE_GROUP" "$VAR_XTRADE/approvals"
 install -d -m 0700 -o "$XTRADE_USER" -g "$XTRADE_GROUP" "$VAR_XTRADE/logs"
 install -d -m 0700 -o "$XTRADE_USER" -g "$XTRADE_GROUP" "$VAR_XTRADE/archive"
+# numba JIT cache (A6 Bug 3): vectorbt's eager numba imports need a
+# writable cache dir under ProtectSystem=strict + ProtectHome=yes;
+# without it, supervisor + bridge crash on first import.
+install -d -m 0700 -o "$XTRADE_USER" -g "$XTRADE_GROUP" "$VAR_XTRADE/numba_cache"
 echo "[+] directories ready"
 
 # --- release unpack -------------------------------------------------------
@@ -108,7 +112,17 @@ ln -sfn "$RELEASE_DIR" "$OPT_XTRADE/current"
 echo "[+] $OPT_XTRADE/current -> $RELEASE_DIR"
 
 # --- uv + python 3.12 venv ------------------------------------------------
+# A6 Bug 1: uv defaults to ~/.local/share/uv/python (=/root/...). systemd
+# launches xtrade as user `xtrade`, whose execve() of the venv python
+# follows the symlink into /root/... — mode 0550 on /root blocks the
+# traverse and fails with status=203/EXEC. Pin uv's Python install to a
+# world-readable location and chmod it.
 UV_BIN="/usr/local/bin/uv"
+UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/opt/uv/python}"
+export UV_PYTHON_INSTALL_DIR
+install -d -m 0755 -o root -g root /opt/uv
+install -d -m 0755 -o root -g root "$UV_PYTHON_INSTALL_DIR"
+
 if [[ ! -x "$UV_BIN" ]]; then
     echo "[+] installing uv"
     curl -fsSL https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
@@ -116,11 +130,14 @@ fi
 if [[ ! -d "$OPT_XTRADE/.venv" ]]; then
     "$UV_BIN" python install 3.12 >/dev/null
     "$UV_BIN" venv --python 3.12 "$OPT_XTRADE/.venv"
-    echo "[+] created venv at $OPT_XTRADE/.venv"
+    echo "[+] created venv at $OPT_XTRADE/.venv (python from $UV_PYTHON_INSTALL_DIR)"
 fi
 VIRTUAL_ENV="$OPT_XTRADE/.venv" "$UV_BIN" pip install --quiet --upgrade pip
 VIRTUAL_ENV="$OPT_XTRADE/.venv" "$UV_BIN" pip install --quiet "$OPT_XTRADE/current"
 chown -R root:root "$OPT_XTRADE/.venv"
+# A6 Bug 1: make the Python toolchain traversable + readable for xtrade user
+# (the venv's python3 is a symlink into here).
+chmod -R a+rX /opt/uv
 echo "[+] xtrade installed into venv"
 
 # --- /etc/xtrade configs --------------------------------------------------
@@ -134,12 +151,26 @@ for cfg in venues.binance_spot.testnet.yaml \
            venues.binance_futures.testnet.yaml \
            venues.hyperliquid.testnet.yaml \
            universe.example.yaml \
-           risk.example.yaml; do
+           risk.example.yaml \
+           supervisor.example.yaml; do
     src="$OPT_XTRADE/current/config/$cfg"
     dst="$ETC_XTRADE/${cfg/.example/}"
     [[ -f "$src" && ! -f "$dst" ]] && install -m 0640 -o root -g "$XTRADE_GROUP" "$src" "$dst" \
         && echo "[+] seeded $dst"
 done
+
+# A6 Bug 3: ensure NUMBA_CACHE_DIR + HOME are in /etc/xtrade/env. These
+# are required by vectorbt's eager numba imports; without them the
+# supervisor + bridge crash at startup with "no locator available".
+# Idempotent: only append if missing.
+if ! grep -q '^NUMBA_CACHE_DIR=' "$ETC_XTRADE/env" 2>/dev/null; then
+    printf '\n# A6: required for vectorbt/numba under ProtectSystem=strict.\nNUMBA_CACHE_DIR=%s/numba_cache\n' "$VAR_XTRADE" >> "$ETC_XTRADE/env"
+    echo "[+] appended NUMBA_CACHE_DIR to $ETC_XTRADE/env"
+fi
+if ! grep -q '^HOME=' "$ETC_XTRADE/env" 2>/dev/null; then
+    printf 'HOME=%s\n' "$VAR_XTRADE" >> "$ETC_XTRADE/env"
+    echo "[+] appended HOME to $ETC_XTRADE/env"
+fi
 
 # --- systemd unit render --------------------------------------------------
 export OPT_XTRADE VAR_XTRADE ETC_XTRADE XTRADE_USER XTRADE_GROUP
@@ -191,7 +222,23 @@ for unit in xtrade-supervisor.service xtrade-bridge.service xtrade-scanner.timer
 done
 
 if [[ $fail -ne 0 ]]; then
-    echo "ERROR: one or more units failed to start." >&2
+    cat >&2 <<HINT
+ERROR: one or more units failed to start.
+
+Operator triage checklist (in order):
+  1. sudo systemctl status xtrade-supervisor.service xtrade-bridge.service --no-pager
+  2. sudo journalctl -u xtrade-supervisor --no-pager | tail -50
+  3. Confirm required env vars are set:
+       sudo grep -E '^(OPENCLAW|BINANCE_FUTURES|HYPERLIQUID|NUMBA_CACHE_DIR|HOME)=' $ETC_XTRADE/env
+  4. Confirm numba cache + uv python are present + traversable:
+       sudo ls -ld /opt/uv $VAR_XTRADE/numba_cache
+  5. Verify venv interpreter resolves for the xtrade user:
+       sudo -u $XTRADE_USER readlink -f $OPT_XTRADE/.venv/bin/python3
+  6. If bridge crashes with numba "no locator available", confirm its unit
+     drop-in (if any) has ReadWritePaths covering $VAR_XTRADE/numba_cache.
+
+After fixing, re-run this installer; it is idempotent.
+HINT
     exit 2
 fi
 

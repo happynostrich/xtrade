@@ -120,3 +120,84 @@ def test_install_script_uses_envsubst_with_whitelist() -> None:
     text = (REPO_ROOT / "scripts" / "phase4" / "install_vps.sh").read_text()
     assert "SUBST_VARS=" in text
     assert 'envsubst "$SUBST_VARS"' in text
+
+
+# --- A6 regressions ------------------------------------------------------
+
+
+def _install_text() -> str:
+    return (REPO_ROOT / "scripts" / "phase4" / "install_vps.sh").read_text()
+
+
+def test_install_script_pins_uv_python_install_dir() -> None:
+    """A6 Bug 1: uv's default Python install location is `~/.local/share/
+    uv/python` which becomes `/root/...` when the installer runs as root.
+    The xtrade system user cannot traverse mode-0550 `/root`, so systemd
+    exec fails with status=203/EXEC. Installer must pin Python to a
+    world-readable path and make it traversable.
+    """
+    text = _install_text()
+    assert "UV_PYTHON_INSTALL_DIR" in text, (
+        "installer must set UV_PYTHON_INSTALL_DIR (A6 Bug 1)"
+    )
+    assert "/opt/uv" in text, "installer must put uv toolchain under /opt/uv"
+    assert "chmod -R a+rX /opt/uv" in text, (
+        "installer must chmod /opt/uv traversable/readable for xtrade user"
+    )
+
+
+def test_install_script_seeds_supervisor_yaml() -> None:
+    """A6 Bug 2: without a seeded `/etc/xtrade/supervisor.yaml` the
+    supervisor unit crashes immediately with FileNotFoundError.
+    """
+    text = _install_text()
+    assert "supervisor.example.yaml" in text, (
+        "installer must seed supervisor.yaml from the example template "
+        "(A6 Bug 2)"
+    )
+
+
+def test_install_script_creates_numba_cache_dir() -> None:
+    """A6 Bug 3 (part 1): vectorbt's eager numba imports need a writable
+    cache dir under ProtectSystem=strict + ProtectHome=yes.
+    """
+    text = _install_text()
+    assert "numba_cache" in text, (
+        "installer must create /var/lib/xtrade/numba_cache (A6 Bug 3)"
+    )
+
+
+def test_install_script_appends_numba_env_vars() -> None:
+    """A6 Bug 3 (part 2): supervisor + bridge processes both need
+    NUMBA_CACHE_DIR and HOME set in /etc/xtrade/env. Without them numba
+    falls back to its in-tree locator which is read-only.
+    """
+    text = _install_text()
+    assert "NUMBA_CACHE_DIR=" in text, "installer must append NUMBA_CACHE_DIR"
+    assert "HOME=" in text, "installer must append HOME to env file"
+
+
+def test_install_script_post_fail_hint_present() -> None:
+    """A6 Bug 4-style: when the post-start health check fails, the
+    installer must print an actionable triage checklist so the operator
+    isn't stuck staring at `is-active` exit codes.
+    """
+    text = _install_text()
+    assert "Operator triage checklist" in text
+    # Must reference the key diagnostic commands.
+    assert "journalctl -u xtrade-supervisor" in text
+    assert "readlink -f" in text  # venv interpreter resolve hint
+
+
+def test_uninstall_purge_removes_uv_toolchain() -> None:
+    """A6 Bug 1: uninstall --purge must clean up /opt/uv we created;
+    the default (no --purge) path must NOT touch it (defense in depth
+    against accidentally breaking sibling tools that share /opt/uv).
+    """
+    text = (REPO_ROOT / "scripts" / "phase4" / "uninstall_vps.sh").read_text()
+    assert "rm -rf /opt/uv" in text
+    purge_idx = text.index("if [[ $PURGE -eq 1 ]]")
+    purge_block = text[purge_idx:]
+    pre_block = text[:purge_idx]
+    assert "rm -rf /opt/uv" in purge_block
+    assert "rm -rf /opt/uv" not in pre_block

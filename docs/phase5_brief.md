@@ -321,6 +321,18 @@ VPS 文件布局新增：
 - VPS 复现：在干净 OpenCloudOS 9.x VPS 上 `bash install_vps.sh --release-tarball ...` 一次跑通到 `xtrade-supervisor.service` `active` 状态（除 `/etc/xtrade/env` 凭据外无需任何手动步骤）；命令日志归档到 `docs/phase5_results.md` §A6。
 - 旧 VPS（已踩到 bug 的本机）：可选回归测试，`uninstall_vps.sh` 完全清理后再走一遍 installer。
 
+**SHIPPED 2026-05-25** — Bugs 1, 2, 3, 4-hint, 5, 6, 7, 8 全部 source-tree 修复完成。验收：676 passed / 8 skipped（vs A5 baseline 663 → +13 新测试）。生效改动：
+
+- `scripts/phase4/install_vps.sh`：Bug 1（`UV_PYTHON_INSTALL_DIR=/opt/uv/python` + `chmod -R a+rX /opt/uv`）+ Bug 2（seed `supervisor.example.yaml` → `/etc/xtrade/supervisor.yaml`）+ Bug 3（创建 `numba_cache/` 并追加 `NUMBA_CACHE_DIR` + `HOME` 到 `/etc/xtrade/env`）+ Bug 4-hint（post-fail 操作员 triage checklist）。
+- `scripts/phase4/uninstall_vps.sh`：`--purge` 现在也清 `/opt/uv`。
+- `deploy/systemd/xtrade-bridge.service.in`：Bug 5（`MemoryMax` 200M → 512M，注释引用观测到的 ~275M peak）+ Bug 3（`ReadWritePaths` 加 `numba_cache`，仍保持窄于 supervisor）。
+- `deploy/env/xtrade.env.example`：Bug 6（按 venues YAML 重命名为 `BINANCE_FUTURES_TESTNET_*` / `HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS` / `HYPERLIQUID_TESTNET_API_WALLET_KEY`；删除从未被读的 `HYPERLIQUID_TESTNET_PRIVATE_KEY` / `_WALLET_ADDRESS`）。
+- `src/xtrade/config.py`：Bug 7（`XTRADE_ENV_FILE` override + 错误信息引用真实 env 文件路径）。
+- `src/xtrade/risk/rules.py`：Bug 8（`load_rules_from_yaml(path: str | Path)` + `Path(path)` 兜底；commit `b2934ad`）。
+- 新测试：`tests/test_venues_env_crosscheck.py`（venues YAML ↔ env 模板交叉验证）+ `tests/test_deploy_install_vps.py` 增加 6 个 A6 回归断言 + `tests/test_deploy_systemd_units.py` 加 `bridge ReadWritePaths` 包含 `numba_cache` 断言 + `tests/test_deploy_env_template.py` `REQUIRED_KEYS` 同步更新。
+
+未做（推迟到 B5/B6 之后或单独跟进）：(a) Bug 5 中"CLI 懒加载"长线方案 + `test_cli_import_footprint.py`（当前用 unit 内存上调兜底）；(b) "本地 install→start 端到端 self-test"（installer 是写时不可触动 root 的脚本，端到端只在 VPS 上验证）；(c) `test_cli_live_supervise.py` fixture 扩展以覆盖完整 risk_yaml + venues_yaml 装载路径（避免再次出现 Bug 8 类未跑路径）。
+
 ### Track B
 
 #### Task B1 —— news 情绪 feature pipeline

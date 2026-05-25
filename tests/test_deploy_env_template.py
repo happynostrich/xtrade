@@ -13,11 +13,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = REPO_ROOT / "deploy" / "env" / "xtrade.env.example"
 
+# A6 Bug 6: keys must match what `config/venues.*.yaml` reference. The
+# legacy `HYPERLIQUID_TESTNET_PRIVATE_KEY` / `_WALLET_ADDRESS` pair was
+# never read by `src/xtrade/config.py` and is removed.
+# `BINANCE_FUTURES_TESTNET_*` is the canonical name (matches
+# `config/venues.binance_futures.testnet.yaml`); the legacy shared
+# `BINANCE_TESTNET_*` is kept as an OPTIONAL fallback (consumed by the
+# Phase 0 backward-compat loader) and therefore NOT required.
 REQUIRED_KEYS = {
-    "BINANCE_TESTNET_API_KEY",
-    "BINANCE_TESTNET_API_SECRET",
-    "HYPERLIQUID_TESTNET_PRIVATE_KEY",
-    "HYPERLIQUID_TESTNET_WALLET_ADDRESS",
+    "BINANCE_FUTURES_TESTNET_API_KEY",
+    "BINANCE_FUTURES_TESTNET_API_SECRET",
+    "HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS",
+    "HYPERLIQUID_TESTNET_API_WALLET_KEY",
     "OPENCLAW_GATEWAY",
     "OPENCLAW_SHARED_SECRET",
     "OPENCLAW_INBOUND_SECRET",

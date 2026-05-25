@@ -46,13 +46,17 @@ rm -rf "$OPT_XTRADE"
 
 if [[ $PURGE -eq 1 ]]; then
     rm -rf "$VAR_XTRADE" "$ETC_XTRADE"
+    # A6 Bug 1: installer pins uv's Python toolchain under /opt/uv;
+    # only remove it on --purge so unrelated tooling on the host is
+    # unaffected by a routine uninstall.
+    rm -rf /opt/uv
     if id "$XTRADE_USER" >/dev/null 2>&1; then
         userdel "$XTRADE_USER" 2>/dev/null || true
     fi
     if getent group "$XTRADE_GROUP" >/dev/null; then
         groupdel "$XTRADE_GROUP" 2>/dev/null || true
     fi
-    echo "[DONE] xtrade purged (state + config + user removed)"
+    echo "[DONE] xtrade purged (state + config + user + /opt/uv removed)"
 else
     echo "[DONE] xtrade uninstalled; state preserved at $VAR_XTRADE and $ETC_XTRADE"
 fi

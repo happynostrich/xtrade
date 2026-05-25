@@ -115,8 +115,29 @@ def test_bridge_unit_localhost_only() -> None:
 
 def test_bridge_unit_caps_smaller_than_supervisor() -> None:
     text = _render("xtrade-bridge.service")
-    assert "MemoryMax=200M" in text
+    # A6 Bug 5: bumped from 200M to 512M after observed RSS of ~275M from
+    # vectorbt + numba eager imports. Still strictly less than the
+    # supervisor's 1500M cap.
+    assert "MemoryMax=512M" in text
     assert "CPUQuota=20%" in text
+
+
+def test_bridge_unit_readwritepaths_includes_numba_cache() -> None:
+    """A6 Bug 3: vectorbt's numba imports need a writable cache dir;
+    without it the bridge crashes at startup with `cannot cache function
+    ...: no locator available`.
+    """
+    text = _render("xtrade-bridge.service")
+    rw_lines = [l for l in text.splitlines() if l.startswith("ReadWritePaths=")]
+    assert rw_lines, "bridge: ReadWritePaths missing"
+    line = rw_lines[0]
+    assert "/var/lib/xtrade/approvals" in line
+    assert "/var/lib/xtrade/numba_cache" in line
+    # Defense in depth: bridge must still NOT have blanket write to
+    # /var/lib/xtrade (signals/ logs/ etc. stay owned by supervisor).
+    assert " /var/lib/xtrade " not in f" {line} ", (
+        f"bridge ReadWritePaths must be narrow, got: {line!r}"
+    )
 
 
 def test_scanner_service_is_oneshot() -> None:

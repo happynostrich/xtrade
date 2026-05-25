@@ -37,12 +37,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = REPO_ROOT / ".env"
 
 
+def _resolve_env_path() -> Path:
+    """Return the dotenv path to load. Honors `XTRADE_ENV_FILE` override
+    (A6 Bug 7) so VPS deployments can point at `/etc/xtrade/env` instead
+    of the dev-tree `.env`. The env-var path takes precedence even if
+    the file does not exist (the caller's `exists()` check decides).
+    """
+    override = os.environ.get("XTRADE_ENV_FILE")
+    if override:
+        return Path(override)
+    return _ENV_PATH
+
+
 def _load_env_once() -> None:
-    """Load `.env` if present. Safe to call multiple times."""
+    """Load `.env` (or `$XTRADE_ENV_FILE`) if present. Safe to call
+    multiple times."""
     if load_dotenv is None:
         return
-    if _ENV_PATH.exists():
-        load_dotenv(dotenv_path=_ENV_PATH, override=False)
+    path = _resolve_env_path()
+    if path.exists():
+        load_dotenv(dotenv_path=path, override=False)
 
 
 _load_env_once()
@@ -63,7 +77,8 @@ def _require(var: str) -> str:
     if not val:
         raise MissingCredentialError(
             f"Required environment variable `{var}` is not set. "
-            f"Please add it to your `.env` (see `.env.example`). "
+            f"Please add it to your env file ({_resolve_env_path()}; "
+            f"override via XTRADE_ENV_FILE). "
             f"Phase 0 scripts will NOT auto-generate credentials."
         )
     return val
@@ -259,7 +274,8 @@ def _resolve_env_ref(section: dict[str, Any], key: str, *, required: bool) -> st
             raise MissingCredentialError(
                 f"Environment variable `{var_name}` (referenced by `{ref_key}` "
                 f"in venues yaml) is not set. Please add `{var_name}=...` to "
-                f"your `.env` file at {_ENV_PATH}."
+                f"your env file ({_resolve_env_path()}; override via "
+                f"XTRADE_ENV_FILE)."
             )
         return None
     return val
