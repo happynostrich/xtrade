@@ -2018,6 +2018,62 @@ def research_train(
     )
 
 
+@research_app.command("replay-gate")
+def research_replay_gate(
+    run_id: str = typer.Option(..., "--run-id", help="Model run_id under --models-root."),
+    since: str = typer.Option(..., "--since", help="UTC ISO (inclusive)."),
+    until: str = typer.Option(..., "--until", help="UTC ISO (exclusive)."),
+    signals_root: Path = typer.Option(
+        Path("data/signals"), "--signals-root", help="SignalQueue jsonl shards root."
+    ),
+    models_root: Path = typer.Option(Path("models"), "--models-root"),
+    score_threshold: float = typer.Option(0.55, "--score-threshold"),
+    direction_check: bool = typer.Option(True, "--direction-check/--no-direction-check"),
+) -> None:
+    """Replay a trained ML gate over persisted signals; write JSON summary."""
+
+    from xtrade.research.replay_gate import replay_gate  # noqa: PLC0415
+
+    def _p(s: str) -> dt.datetime:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+    out_path = replay_gate(
+        run_id=run_id,
+        since=_p(since),
+        until=_p(until),
+        signals_root=signals_root,
+        models_root=models_root,
+        score_threshold=score_threshold,
+        direction_check=direction_check,
+    )
+    typer.echo(f"summary={out_path}")
+
+
+@research_app.command("promote")
+def research_promote(
+    run_id: str = typer.Argument(..., help="Trained run_id under --models-root."),
+    models_root: Path = typer.Option(
+        Path("models"), "--models-root", help="Directory containing trained runs + active.json."
+    ),
+    promoted_by: str = typer.Option(
+        "cli", "--promoted-by", help="Operator id stamped into active.json."
+    ),
+) -> None:
+    """Promote `<run_id>` to the active model pointer (Track C3)."""
+
+    from xtrade.research.registry import ModelRegistryError, promote  # noqa: PLC0415
+
+    try:
+        active = promote(run_id, models_root=models_root, promoted_by=promoted_by)
+    except ModelRegistryError as exc:
+        typer.echo(f"promote FAILED: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(
+        f"promoted run_id={active.run_id} model_path={active.model_path}"
+        f" active_since={active.active_since}"
+    )
+
+
 def main() -> None:  # pragma: no cover - thin shim
     """Module-level entry for `python -m xtrade.cli`."""
     app()

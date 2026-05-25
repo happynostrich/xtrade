@@ -57,6 +57,7 @@ DEFAULT_SIGNALS_ROOT = Path("/var/lib/xtrade/signals")
 DEFAULT_APPROVALS_ROOT = Path("/var/lib/xtrade/approvals")
 DEFAULT_CURSOR_PATH = Path("/var/lib/xtrade/signals/.cursor")
 DEFAULT_LOGS_ROOT = Path("/var/lib/xtrade/logs")
+DEFAULT_AUDIT_ROOT = Path("/var/lib/xtrade/audit")
 DEFAULT_SUPERVISOR_UNIT = "xtrade-supervisor.service"
 
 
@@ -73,6 +74,7 @@ class OpsPaths:
     cursor_path: Path = DEFAULT_CURSOR_PATH
     sentinel_path: Path = DEFAULT_SENTINEL_PATH
     logs_root: Path = DEFAULT_LOGS_ROOT
+    audit_root: Path = DEFAULT_AUDIT_ROOT
     supervisor_unit: str = DEFAULT_SUPERVISOR_UNIT
 
     @classmethod
@@ -133,6 +135,36 @@ class BridgeStatus:
 
 
 @dataclasses.dataclass(frozen=True)
+class MLGateStatus:
+    """Aggregate of ML-gate decisions over the last 24 h.
+
+    Source: ``<audit_root>/ml_gate.<YYYY-MM-DD>.jsonl`` (atomic-append
+    jsonl written by `xtrade.strategy.ml_gate_audit.MLGateAuditWriter`).
+
+    ``suppression_rate_24h`` is intentionally ``None`` when the sample
+    size is below :data:`_MLGATE_RATE_MIN_SAMPLE` — an operator looking
+    at "1 / 1 suppressed = 100 %" gets a noisier picture than "n/a".
+    """
+
+    suppressed_24h: int = 0
+    allowed_24h: int = 0
+    suppression_rate_24h: float | None = None
+    last_event_age_s: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "suppressed_24h": self.suppressed_24h,
+            "allowed_24h": self.allowed_24h,
+            "suppression_rate_24h": self.suppression_rate_24h,
+            "last_event_age_s": self.last_event_age_s,
+        }
+
+
+# Minimum decisions observed in the 24h window before reporting a rate.
+_MLGATE_RATE_MIN_SAMPLE = 10
+
+
+@dataclasses.dataclass(frozen=True)
 class OpsStatus:
     """One-shot snapshot returned by :func:`collect_status`."""
 
@@ -148,6 +180,7 @@ class OpsStatus:
     last_fill_age_s: float | None
     last_fill_passed: bool | None
     bridge: BridgeStatus
+    ml_gate: MLGateStatus
     collected_at: str
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -164,6 +197,7 @@ class OpsStatus:
             "last_fill_age_s": self.last_fill_age_s,
             "last_fill_passed": self.last_fill_passed,
             "bridge": self.bridge.to_dict(),
+            "ml_gate": self.ml_gate.to_dict(),
             "collected_at": self.collected_at,
         }
 
@@ -203,6 +237,7 @@ def collect_status(
         paths.logs_root, now=when,
     )
     bridge = _read_last_bridge_dispatch(paths.approvals_root)
+    ml_gate = _read_ml_gate_audit(paths.audit_root, now=when)
     supervisor = probe(paths.supervisor_unit)
 
     return OpsStatus(
@@ -218,6 +253,7 @@ def collect_status(
         last_fill_age_s=last_fill_age_s,
         last_fill_passed=last_fill_passed,
         bridge=bridge,
+        ml_gate=ml_gate,
         collected_at=when.astimezone(dt.timezone.utc).isoformat(),
     )
 
@@ -457,6 +493,83 @@ def _age_from_iso(iso: str | None, *, now: dt.datetime) -> float | None:
     return max(0.0, (now - parsed).total_seconds())
 
 
+# ---- ML-gate audit reader (C2) ------------------------------------------
+
+
+def _read_ml_gate_audit(audit_root: Path, *, now: dt.datetime) -> MLGateStatus:
+    """Scan the last 2 day-shards of `ml_gate.<date>.jsonl` for 24h aggregates.
+
+    Pure-filesystem; missing directory / corrupt rows degrade to zeros
+    so `xtrade ops status` keeps working when the supervisor is dead.
+
+    Two day-shards are enough to cover any 24 h window straddling
+    midnight UTC. We never scan deeper to keep the call O(1) in disk
+    history size.
+    """
+    empty = MLGateStatus()
+    if not audit_root.exists() or not audit_root.is_dir():
+        return empty
+
+    today = now.astimezone(dt.timezone.utc).date()
+    yesterday = today - dt.timedelta(days=1)
+    cutoff = now - dt.timedelta(hours=24)
+
+    suppressed = 0
+    allowed = 0
+    newest: dt.datetime | None = None
+
+    for day in (yesterday, today):
+        shard = audit_root / f"ml_gate.{day.isoformat()}.jsonl"
+        if not shard.exists():
+            continue
+        try:
+            text = shard.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts_raw = row.get("ts")
+            if not isinstance(ts_raw, str):
+                continue
+            try:
+                row_ts = dt.datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if row_ts.tzinfo is None:
+                row_ts = row_ts.replace(tzinfo=dt.timezone.utc)
+            if row_ts < cutoff:
+                continue
+            kind = row.get("kind")
+            if kind == "allowed":
+                allowed += 1
+            elif kind == "suppressed":
+                suppressed += 1
+            else:
+                continue
+            if newest is None or row_ts > newest:
+                newest = row_ts
+
+    total = suppressed + allowed
+    rate: float | None
+    if total >= _MLGATE_RATE_MIN_SAMPLE:
+        rate = round(100.0 * suppressed / total, 2)
+    else:
+        rate = None
+    age = (now - newest).total_seconds() if newest is not None else None
+    return MLGateStatus(
+        suppressed_24h=suppressed,
+        allowed_24h=allowed,
+        suppression_rate_24h=rate,
+        last_event_age_s=max(0.0, age) if age is not None else None,
+    )
+
+
 # ---- renderers ----------------------------------------------------------
 
 
@@ -505,7 +618,20 @@ def render_status_text(status: OpsStatus) -> str:
         f"  passed={status.last_fill_passed}"
     )
     lines.append(f"bridge.last_dispatch: {_fmt_dispatch(status.bridge)}")
+    lines.append(
+        "ml_gate:"
+        f" allowed_24h={status.ml_gate.allowed_24h}"
+        f" suppressed_24h={status.ml_gate.suppressed_24h}"
+        f" suppression_rate={_fmt_pct(status.ml_gate.suppression_rate_24h)}"
+        f" last_event_age_s={_fmt_float(status.ml_gate.last_event_age_s)}"
+    )
     return "\n".join(lines)
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.1f}%"
 
 
 def _fmt_float(value: float | None) -> str:
@@ -530,11 +656,13 @@ def _fmt_dispatch(bridge: BridgeStatus) -> str:
 __all__ = [
     "BridgeStatus",
     "DEFAULT_APPROVALS_ROOT",
+    "DEFAULT_AUDIT_ROOT",
     "DEFAULT_CURSOR_PATH",
     "DEFAULT_LOGS_ROOT",
     "DEFAULT_SENTINEL_PATH",
     "DEFAULT_SIGNALS_ROOT",
     "DEFAULT_SUPERVISOR_UNIT",
+    "MLGateStatus",
     "OpsPaths",
     "OpsStatus",
     "SupervisorState",

@@ -16,6 +16,7 @@ Submodules
 
 from xtrade.ops.status import (
     BridgeStatus,
+    MLGateStatus,
     OpsPaths,
     OpsStatus,
     SupervisorState,
@@ -27,6 +28,7 @@ from xtrade.ops.status import (
 
 __all__ = [
     "BridgeStatus",
+    "MLGateStatus",
     "OpsPaths",
     "OpsStatus",
     "SupervisorState",

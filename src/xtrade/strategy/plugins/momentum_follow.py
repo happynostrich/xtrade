@@ -97,6 +97,18 @@ class MomentumFollow(SignalDrivenStrategy):
             if self._ml_gate_config.enabled:
                 self._ml_gate = MLGate(self._ml_gate_config)
 
+        # Phase 5 / Track C2: optional jsonl audit of allowed / suppressed
+        # decisions. The ops `xtrade ops status` ml_gate block scans this
+        # directory. When absent (default for unit tests / paper runs),
+        # the writer is None and the gate is silent on disk (journalctl
+        # via emit_event remains).
+        self._ml_gate_audit = None
+        audit_root = self.config.get("ml_gate_audit_root")
+        if audit_root is not None and self._ml_gate is not None:
+            from xtrade.strategy.ml_gate_audit import MLGateAuditWriter  # noqa: PLC0415
+
+            self._ml_gate_audit = MLGateAuditWriter.if_enabled(audit_root)
+
     # ---- override -------------------------------------------------------
 
     def on_signal(
@@ -179,6 +191,29 @@ class MomentumFollow(SignalDrivenStrategy):
             decision = gate.decide(side=intent.side, features=features)
             if decision.allow:
                 passed.append(intent)
+                emit_event(
+                    _log,
+                    "strategy.ml_gate.allowed",
+                    signal_symbol=signal.symbol,
+                    signal_direction=signal.direction,
+                    intent_side=intent.side,
+                    model_score=round(float(decision.score), 6),
+                    threshold=float(gate.config.score_threshold),
+                    direction_check=bool(gate.config.direction_check),
+                    reason=decision.reason,
+                    source_signal_id=intent.source_signal_id,
+                )
+                if self._ml_gate_audit is not None:
+                    self._ml_gate_audit.write(
+                        kind="allowed",
+                        symbol=signal.symbol,
+                        side=intent.side,
+                        score=float(decision.score),
+                        threshold=float(gate.config.score_threshold),
+                        reason=decision.reason,
+                        source_signal_id=intent.source_signal_id,
+                        ts=intent.created_at,
+                    )
                 continue
             emit_event(
                 _log,
@@ -192,6 +227,17 @@ class MomentumFollow(SignalDrivenStrategy):
                 reason=decision.reason,
                 source_signal_id=intent.source_signal_id,
             )
+            if self._ml_gate_audit is not None:
+                self._ml_gate_audit.write(
+                    kind="suppressed",
+                    symbol=signal.symbol,
+                    side=intent.side,
+                    score=float(decision.score),
+                    threshold=float(gate.config.score_threshold),
+                    reason=decision.reason,
+                    source_signal_id=intent.source_signal_id,
+                    ts=intent.created_at,
+                )
         return passed
 
     def _build_gate_features(self, signal: Signal) -> dict[str, float]:

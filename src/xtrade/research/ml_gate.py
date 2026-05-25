@@ -80,6 +80,11 @@ class MLGateConfig:
     model_path: Path | None = None
     score_threshold: float = 0.55
     direction_check: bool = True
+    # Track C3: when True, ignore ``model_path`` and resolve from the
+    # model registry's ``active.json`` at construction time. ``models_root``
+    # is the directory containing that pointer (defaults to ``models/``).
+    use_active_model: bool = False
+    models_root: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.score_threshold, (int, float)):
@@ -90,11 +95,15 @@ class MLGateConfig:
             raise ValueError(
                 f"score_threshold must be in (0, 1), got {self.score_threshold}"
             )
-        if self.enabled and self.model_path is None:
-            raise ValueError("ml_gate.enabled=True requires model_path to be set")
+        if self.enabled and not self.use_active_model and self.model_path is None:
+            raise ValueError(
+                "ml_gate.enabled=True requires model_path (or use_active_model=True)"
+            )
         if self.model_path is not None and not isinstance(self.model_path, Path):
             # Friendly: tolerate str at construction time.
             object.__setattr__(self, "model_path", Path(self.model_path))
+        if self.models_root is not None and not isinstance(self.models_root, Path):
+            object.__setattr__(self, "models_root", Path(self.models_root))
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "MLGateConfig":
@@ -102,7 +111,10 @@ class MLGateConfig:
 
             ml_gate:
               enabled: true
-              model_path: /opt/xtrade/models/abc123/model.pkl
+              model_path: /opt/xtrade/models/abc123/model.pkl   # legacy mode
+              # OR (preferred, Track C3):
+              use_active_model: true
+              models_root: /var/lib/xtrade/models
               score_threshold: 0.6
               direction_check: true
         """
@@ -117,7 +129,36 @@ class MLGateConfig:
             kwargs["score_threshold"] = float(raw["score_threshold"])
         if "direction_check" in raw:
             kwargs["direction_check"] = bool(raw["direction_check"])
+        if "use_active_model" in raw:
+            kwargs["use_active_model"] = bool(raw["use_active_model"])
+        if "models_root" in raw and raw["models_root"] is not None:
+            kwargs["models_root"] = Path(str(raw["models_root"]))
         return cls(**kwargs)
+
+    def resolve_model_path(self) -> Path:
+        """Return the effective ``model.pkl`` path.
+
+        When ``use_active_model=True``, consults ``models_root/active.json``
+        via `xtrade.research.registry.read_active`. Otherwise returns the
+        config's ``model_path`` directly. Raises ``ValueError`` when the
+        registry lookup is requested but unresolvable — strategies refuse
+        to start with `enabled=True` and no resolvable model.
+        """
+        if not self.use_active_model:
+            if self.model_path is None:
+                raise ValueError("model_path is None and use_active_model=False")
+            return self.model_path
+        # Lazy import so the registry module isn't pulled in when the gate
+        # is disabled.
+        from xtrade.research.registry import read_active  # noqa: PLC0415
+
+        root = self.models_root if self.models_root is not None else Path("models")
+        active = read_active(root)
+        if active is None:
+            raise ValueError(
+                f"ml_gate.use_active_model=True but no active.json found in {root}"
+            )
+        return active.model_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +178,12 @@ class MLGate:
     def __init__(self, config: MLGateConfig) -> None:
         if not config.enabled:
             raise ValueError("MLGate constructed with config.enabled=False")
-        if config.model_path is None:
-            raise ValueError("MLGate constructed without model_path")
         self.config = config
-        self._model, self._meta = _load_model_and_meta(config.model_path)
+        # Track C3: resolve via registry when use_active_model=True;
+        # otherwise honour the literal model_path.
+        resolved = config.resolve_model_path()
+        self._model, self._meta = _load_model_and_meta(resolved)
+        self._resolved_model_path: Path = resolved
         self._feature_names: tuple[str, ...] = tuple(self._meta["feature_names"])
         # Per-(model, feature) warn-once memo so we don't flood logs.
         self._warned_missing: set[str] = set()

@@ -35,6 +35,7 @@ from xtrade.ops import (
     render_status_json,
     render_status_text,
 )
+from xtrade.ops.status import MLGateStatus
 from xtrade.ops import status as ops_status_module
 from xtrade.strategy.intent import OrderIntent
 
@@ -345,6 +346,7 @@ def _rich_status() -> OpsStatus:
             last_dispatch_approval_id="abc123",
             last_dispatch_attempts=1,
         ),
+        ml_gate=MLGateStatus(),
         collected_at="2026-05-24T12:05:00+00:00",
     )
 

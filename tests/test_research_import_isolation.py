@@ -101,3 +101,15 @@ def test_momentum_follow_default_construct_does_not_pull_ml_gate() -> None:
         "MomentumFollow()"
     )
     assert rc == 0, f"isolation violated: {out}\n{err}"
+
+
+def test_ops_status_import_does_not_pull_research_stack() -> None:
+    # `xtrade ops status` is the operator's "is the supervisor dead?"
+    # command — it must stay lightweight and never drag lightgbm /
+    # research-stack modules into the import graph. Track C2's audit
+    # reader lives in ops.status and must remain self-contained.
+    rc, out, err = _run_isolation_check(
+        "import xtrade.ops.status; "
+        "from xtrade.ops.status import collect_status, _read_ml_gate_audit"
+    )
+    assert rc == 0, f"isolation violated: {out}\n{err}"
