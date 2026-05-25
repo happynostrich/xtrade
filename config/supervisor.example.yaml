@@ -1,0 +1,49 @@
+# xtrade supervisor configuration — testnet template.
+#
+# Loaded by `xtrade live supervise --config <path>` (cli.py:950).
+# Schema: src/xtrade/live/supervisor.py:SupervisorConfig.
+#
+# Production install copies this file to /etc/xtrade/supervisor.yaml
+# (mode 0640, owned root:xtrade). Edit in place; restart with:
+#   sudo systemctl restart xtrade-supervisor
+
+# ---- required ------------------------------------------------------------
+
+# Instrument id in nautilus form: <symbol>-<class>.<venue>.
+instrument_id: BTCUSDT-PERP.BINANCE
+
+# Strategy plugin name. List options: `xtrade strategy list`.
+strategy_name: momentum_follow
+
+# Strategy-specific options (passed verbatim to the plugin).
+strategy_config:
+  notional_usd: '100'
+
+# Approval gate: auto | manual | dry_run.
+#   auto    — approve every intent (DANGEROUS even on testnet).
+#   manual  — operator must approve via `xtrade approve confirm <id>`.
+#   dry_run — log every intent and reject (safest for first bring-up).
+approval_mode: manual
+
+# Persistent state and runtime dirs. All paths must be inside the
+# systemd unit's ReadWritePaths= (default: /var/lib/xtrade /run/xtrade).
+signals_root:   /var/lib/xtrade/signals
+approvals_root: /var/lib/xtrade/approvals
+cursor_path:    /var/lib/xtrade/signals/.cursor
+sentinel_path:  /run/xtrade/paused.flag
+logs_root:      /var/lib/xtrade/logs
+
+# ---- optional but recommended -------------------------------------------
+
+# Venue + risk configs (same shape as the standalone xtrade live commands).
+venues_yaml: /etc/xtrade/venues.binance_futures.testnet.yaml
+risk_yaml:   /etc/xtrade/risk.yaml
+
+# ---- optional tuning (defaults shown) -----------------------------------
+
+poll_interval_s:   2.0
+venue_timeout_s:   60.0
+
+# Final multiplier applied to every notional before submission to the venue.
+# Quoted string → Decimal in Python; do not unquote.
+safety_multiplier: '0.7'
