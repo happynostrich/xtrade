@@ -35,14 +35,20 @@ Differences from Phase 3 `run_live_signal`
 
 Trading node lifecycle
 ----------------------
-Phase 4 Task 5 deliberately keeps the Phase 3 "one TradingNode per
-intent" pattern (each `live_executor` call spins a fresh node, places
-a far-from-market limit, cancels, disposes). It is wasteful but
-**re-uses Phase 1's most-tested code path**. Promoting to a single
-persistent always-on node is a Phase 5 follow-up (see `docs/
-phase4_brief.md` §5 Task 4 note on `node.start()`); the current design
-runs intents serially which is fine while scanner cadence is 5min and
-intent execution is ~30s.
+Phase 5 Track A1 — the supervisor now owns a single persistent
+`TradingNode` (`xtrade.live.persistent_executor.PersistentLiveExecutor`).
+When `config.venues_cfg` is set and no `live_executor` is injected,
+`run_supervisor()` constructs the executor at startup, calls
+`node.build()` + `node.run_async()` once (inside a dedicated
+background thread that owns the asyncio loop the engines bind to),
+reuses it across every intent submission, and calls
+`node.stop_async()` + `node.dispose()` once on SIGTERM. Two events
+mark the lifecycle in journalctl: `supervisor.node.start` and
+`supervisor.node.stop` (each fires exactly once per supervisor run).
+
+`config.persistent_node = False` falls back to Phase 4's
+"one intent → one node" behaviour. Tests inject `live_executor=`
+directly and bypass both paths.
 
 Mainnet hard refusal
 --------------------
@@ -112,6 +118,13 @@ class SupervisorConfig:
     # `bridge` may be None when the supervisor runs in dry_run mode
     # (the brief §9 explicitly supports an early no-bridge soak).
     bridge: OpenclawBridge | None = None
+    # Phase 5 A1 — when True (default), the supervisor instantiates a
+    # `PersistentLiveExecutor` at startup, calls `node.start()` once,
+    # and reuses the same node across every intent submission. Setting
+    # this to False falls back to Phase 4's "one intent → one node"
+    # behaviour, which is retained as a kill-switch only. Has no effect
+    # when `venues_cfg` is None or `live_executor` is injected by tests.
+    persistent_node: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,9 +201,36 @@ def run_supervisor(
         stop_event = threading.Event()
     now = clock or (lambda: dt.datetime.now(tz=dt.timezone.utc))
 
+    # Phase 5 A1 — when the caller did not inject an executor, decide
+    # between the persistent path (default) and the legacy
+    # one-intent-one-node path. Track whether *we* created the
+    # executor so we know whether to call `.stop()` at the end.
+    owned_executor: Any = None
     if live_executor is None:
-        # Lazy import keeps offline tests free of the Nautilus dep.
-        from xtrade.live.runner import run_live as live_executor  # noqa: PLC0415
+        if config.venues_cfg is not None and config.persistent_node:
+            # Lazy import keeps offline tests free of the Nautilus dep
+            # when they inject their own executor.
+            from xtrade.live.persistent_executor import (  # noqa: PLC0415
+                PersistentLiveExecutor,
+            )
+
+            owned_executor = PersistentLiveExecutor(
+                config.venues_cfg,
+                logs_root=config.logs_root,
+            )
+            owned_executor.start()
+            emit_event(
+                log,
+                "supervisor.node.start",
+                trader_id=getattr(owned_executor, "_trader_id", None),
+                logs_root=config.logs_root,
+            )
+            live_executor = owned_executor
+        else:
+            # Legacy / no-venues path: one fresh `run_live` call per
+            # intent. Tests that inject their own executor stay on
+            # this branch (live_executor was provided).
+            from xtrade.live.runner import run_live as live_executor  # noqa: PLC0415
 
     queue = SignalQueue(config.signals_root)
     consumer = SignalConsumer(
@@ -230,48 +270,66 @@ def run_supervisor(
 
     results: list[SupervisorIterationResult] = []
     iteration = 0
-    while not stop_event.is_set():
-        if max_iterations is not None and iteration >= max_iterations:
-            break
-        iteration += 1
-        try:
-            iter_result = _supervisor_iteration(
-                iteration=iteration,
-                config=config,
-                consumer=consumer,
-                approval_gate=approval_gate,
-                risk_gate=risk_gate,
-                strategy=strategy,
-                sentinel=sentinel,
-                bridge=config.bridge,
-                live_executor=live_executor,
-                pending=pending,
-                now=now,
-            )
-        except Exception as exc:  # noqa: BLE001
+    try:
+        while not stop_event.is_set():
+            if max_iterations is not None and iteration >= max_iterations:
+                break
+            iteration += 1
+            try:
+                iter_result = _supervisor_iteration(
+                    iteration=iteration,
+                    config=config,
+                    consumer=consumer,
+                    approval_gate=approval_gate,
+                    risk_gate=risk_gate,
+                    strategy=strategy,
+                    sentinel=sentinel,
+                    bridge=config.bridge,
+                    live_executor=live_executor,
+                    pending=pending,
+                    now=now,
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_event(
+                    log,
+                    "supervisor.iteration.crash",
+                    level=logging.ERROR,
+                    iteration=iteration,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                log.exception("supervisor.iteration.crash iteration=%d", iteration)
+                iter_result = SupervisorIterationResult(
+                    iteration=iteration,
+                    paused=False,
+                    signals_seen=0,
+                    signals_processed=0,
+                    intents_submitted=0,
+                    intents_parked_manual=0,
+                    pending_promoted=0,
+                    pending_rejected=0,
+                    errors=(f"{type(exc).__name__}: {exc}",),
+                )
+            results.append(iter_result)
+
+            # Wait one poll interval, but wake early if stop_event fires.
+            stop_event.wait(config.poll_interval_s)
+    finally:
+        # Phase 5 A1 — emit a single `supervisor.node.stop` regardless of
+        # whether the loop exited cleanly, crashed, or never started. The
+        # paired `supervisor.node.start` event is only emitted when we
+        # actually owned the executor, so this `stop` is only meaningful
+        # in the same scope.
+        if owned_executor is not None:
+            try:
+                owned_executor.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("supervisor.node.stop.crash")
             emit_event(
                 log,
-                "supervisor.iteration.crash",
-                level=logging.ERROR,
-                iteration=iteration,
-                error=f"{type(exc).__name__}: {exc}",
+                "supervisor.node.stop",
+                submits=getattr(owned_executor, "submit_count", None),
+                state=getattr(owned_executor, "state", None),
             )
-            log.exception("supervisor.iteration.crash iteration=%d", iteration)
-            iter_result = SupervisorIterationResult(
-                iteration=iteration,
-                paused=False,
-                signals_seen=0,
-                signals_processed=0,
-                intents_submitted=0,
-                intents_parked_manual=0,
-                pending_promoted=0,
-                pending_rejected=0,
-                errors=(f"{type(exc).__name__}: {exc}",),
-            )
-        results.append(iter_result)
-
-        # Wait one poll interval, but wake early if stop_event fires.
-        stop_event.wait(config.poll_interval_s)
 
     emit_event(
         log,
@@ -727,4 +785,5 @@ def load_supervisor_config(
         risk_rules=risk_rules,
         venues_cfg=venues_cfg,
         bridge=bridge,
+        persistent_node=bool(raw.get("persistent_node", True)),
     )
