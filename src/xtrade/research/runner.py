@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from nautilus_trader.model.data import BarType
 
 from xtrade.data.catalog import bar_type_for, open_catalog, parse_bar_spec
 from xtrade.data.instruments import InstrumentResolutionError, resolve
+from xtrade.obs import emit_event
 from xtrade.research.frames import bars_to_panel
 from xtrade.research.gridsearch import run_grid
 from xtrade.research.scanners.base import Scanner, get_scanner
@@ -40,6 +42,12 @@ from xtrade.research.universe import (
     UniverseConfigError,
     load_universe,
 )
+
+
+# Phase 5 A3 — structured event logger. The scanner is the only writer
+# under this name; `tests/test_log_event.py` asserts every event emitted
+# from this module carries the `scanner.` prefix.
+log = logging.getLogger("xtrade.scanner")
 
 
 # ---------------------------------------------------------------------------
@@ -73,13 +81,18 @@ class ScanError(RuntimeError):
 
 
 def _resolve_bar_types(
-    symbols: tuple[SymbolSpec, ...], bar: str
+    symbols: tuple[SymbolSpec, ...],
+    bar: str,
+    *,
+    run_id: str | None = None,
 ) -> tuple[list[BarType], list[str]]:
     """Resolve a sequence of `SymbolSpec` to (bar_types, skipped) tuples.
 
     Symbols whose venue resolver fails (e.g. unknown ticker on Binance)
     are skipped and returned in the second tuple element so the summary
-    can record them rather than aborting the entire run.
+    can record them rather than aborting the entire run. When `run_id`
+    is provided, one `scanner.signal.skipped` event is emitted per
+    skipped symbol so journalctl can show the root cause.
     """
     spec = parse_bar_spec(bar)
     bar_types: list[BarType] = []
@@ -89,6 +102,14 @@ def _resolve_bar_types(
             instrument = resolve(s.venue, s.symbol)
         except InstrumentResolutionError as exc:
             skipped.append(f"{s.venue}:{s.symbol} ({exc})")
+            if run_id is not None:
+                emit_event(
+                    log,
+                    "scanner.signal.skipped",
+                    run_id=run_id,
+                    instrument=f"{s.venue}:{s.symbol}",
+                    reason=f"unresolved: {exc}",
+                )
             continue
         bar_types.append(bar_type_for(instrument, spec))
     return bar_types, skipped
@@ -186,91 +207,151 @@ def run_scan(
     started_at = dt.datetime.now(tz=dt.timezone.utc)
     t0 = time.monotonic()
 
-    universe = load_universe(universe_path)
-    scanner_cls = get_scanner(scanner_name)
-    scanner: Scanner = scanner_cls()
+    try:
+        universe = load_universe(universe_path)
+        scanner_cls = get_scanner(scanner_name)
+        scanner: Scanner = scanner_cls()
 
-    bar_types, skipped = _resolve_bar_types(universe.symbols, bar)
-    if not bar_types:
-        raise ScanError(
-            f"universe yielded zero resolvable instruments (skipped={skipped})"
+        # Phase 5 A3 — structured run header. instruments_count is the
+        # raw universe size; the per-instrument skip events below report
+        # what later got dropped.
+        emit_event(
+            log,
+            "scanner.run.start",
+            run_id=run_id,
+            universe_path=str(universe_path),
+            instruments_count=len(universe),
+            scanner=scanner_name,
+            bar=bar,
         )
 
-    catalog = open_catalog(catalog_path)
-    panel = bars_to_panel(
-        catalog, bar_types, since_ns=since_ns, until_ns=until_ns, field="close"
-    )
+        bar_types, skipped = _resolve_bar_types(
+            universe.symbols, bar, run_id=run_id
+        )
+        if not bar_types:
+            raise ScanError(
+                f"universe yielded zero resolvable instruments (skipped={skipped})"
+            )
 
-    if panel.empty:
-        # Empty catalog or empty window — write a degenerate summary and
-        # bail rather than letting vectorbt explode.
+        catalog = open_catalog(catalog_path)
+        panel = bars_to_panel(
+            catalog, bar_types, since_ns=since_ns, until_ns=until_ns, field="close"
+        )
+
+        if panel.empty:
+            # Empty catalog or empty window — write a degenerate summary
+            # and bail rather than letting vectorbt explode.
+            completed_at = dt.datetime.now(tz=dt.timezone.utc)
+            elapsed = time.monotonic() - t0
+            summary = _build_summary(
+                run_id=run_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                universe=universe,
+                skipped=skipped,
+                scanner_name=scanner_name,
+                param_combos=0,
+                signals_emitted=0,
+                top_k=top_k,
+                elapsed_s=elapsed,
+                errors=["panel is empty: no bars in catalog for requested window"],
+            )
+            summary_path = _write_summary(log_dir, summary)
+            emit_event(
+                log,
+                "scanner.run.complete",
+                run_id=run_id,
+                instruments_count=len(universe),
+                signals_emitted=0,
+                duration_s=round(elapsed, 3),
+                reason="panel_empty",
+            )
+            return ScanRunResult(
+                run_id=run_id,
+                summary=summary,
+                summary_path=summary_path,
+                top_k=pd.DataFrame(),
+                signals_emitted=0,
+                passed=not strict,
+            )
+
+        grid = param_grid if param_grid is not None else scanner.default_param_grid()
+        ranked = run_grid(scanner, panel, grid, scoring=scoring, top_k=top_k)
+
+        # Emit signals only for the top-k params. We *do not* emit one
+        # signal per (ts_event, symbol, params) combination across the
+        # whole grid — the queue would explode. Top-k is the contract.
+        signals: list[Signal] = []
+        for row in ranked.itertuples(index=False):
+            params = json.loads(row.params)
+            records = scanner.run(panel, params)
+            new_signals = _records_to_signals(
+                records, generated_at=started_at, scanner_name=scanner_name
+            )
+            for sig in new_signals:
+                # Phase 5 A3 — one event per signal handed to the queue.
+                # `signal_id` aligns with `Signal.source` (the dedup key
+                # the queue uses), making journalctl ↔ jsonl traceable.
+                emit_event(
+                    log,
+                    "scanner.signal.emitted",
+                    run_id=run_id,
+                    instrument=sig.symbol,
+                    signal_id=sig.source,
+                    decision=sig.direction,
+                )
+            signals.extend(new_signals)
+
+        queue = SignalQueue(queue_root)
+        written = queue.append(signals)
+
+        completed_at = dt.datetime.now(tz=dt.timezone.utc)
+        elapsed = time.monotonic() - t0
         summary = _build_summary(
             run_id=run_id,
             started_at=started_at,
-            completed_at=dt.datetime.now(tz=dt.timezone.utc),
+            completed_at=completed_at,
             universe=universe,
             skipped=skipped,
             scanner_name=scanner_name,
-            param_combos=0,
-            signals_emitted=0,
+            param_combos=int(len(ranked)),
+            signals_emitted=written,
             top_k=top_k,
-            elapsed_s=time.monotonic() - t0,
-            errors=["panel is empty: no bars in catalog for requested window"],
+            elapsed_s=elapsed,
+            errors=[],
         )
         summary_path = _write_summary(log_dir, summary)
+
+        emit_event(
+            log,
+            "scanner.run.complete",
+            run_id=run_id,
+            instruments_count=len(universe),
+            signals_emitted=written,
+            duration_s=round(elapsed, 3),
+        )
+
+        passed = True if not strict else written > 0
         return ScanRunResult(
             run_id=run_id,
             summary=summary,
             summary_path=summary_path,
-            top_k=pd.DataFrame(),
-            signals_emitted=0,
-            passed=not strict,
+            top_k=ranked,
+            signals_emitted=written,
+            passed=passed,
         )
-
-    grid = param_grid if param_grid is not None else scanner.default_param_grid()
-    ranked = run_grid(scanner, panel, grid, scoring=scoring, top_k=top_k)
-
-    # Emit signals only for the top-k params. We *do not* emit one signal
-    # per (ts_event, symbol, params) combination across the whole grid —
-    # the queue would explode. Top-k is the contract.
-    signals: list[Signal] = []
-    for row in ranked.itertuples(index=False):
-        params = json.loads(row.params)
-        records = scanner.run(panel, params)
-        signals.extend(
-            _records_to_signals(
-                records, generated_at=started_at, scanner_name=scanner_name
-            )
+    except Exception as exc:
+        # Phase 5 A3 — terminal-error envelope. We emit before re-raising
+        # so journalctl always shows a paired `scanner.run.error` for
+        # each `scanner.run.start` that didn't reach `scanner.run.complete`.
+        emit_event(
+            log,
+            "scanner.run.error",
+            level=logging.ERROR,
+            run_id=run_id,
+            error=f"{type(exc).__name__}: {exc}",
         )
-
-    queue = SignalQueue(queue_root)
-    written = queue.append(signals)
-
-    completed_at = dt.datetime.now(tz=dt.timezone.utc)
-    summary = _build_summary(
-        run_id=run_id,
-        started_at=started_at,
-        completed_at=completed_at,
-        universe=universe,
-        skipped=skipped,
-        scanner_name=scanner_name,
-        param_combos=int(len(ranked)),
-        signals_emitted=written,
-        top_k=top_k,
-        elapsed_s=time.monotonic() - t0,
-        errors=[],
-    )
-    summary_path = _write_summary(log_dir, summary)
-
-    passed = True if not strict else written > 0
-    return ScanRunResult(
-        run_id=run_id,
-        summary=summary,
-        summary_path=summary_path,
-        top_k=ranked,
-        signals_emitted=written,
-        passed=passed,
-    )
+        raise
 
 
 # ---------------------------------------------------------------------------
