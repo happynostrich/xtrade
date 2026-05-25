@@ -230,7 +230,7 @@ VPS 文件布局新增：
 
 #### Task A6 —— installer hardening（2026-05-24 VPS 首装实测发现）
 
-**背景**：2026-05-24 / 25 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 7 个 bug（其中 5 个是阻断性的），使 `xtrade-supervisor.service` / `xtrade-bridge.service` 在 `systemctl enable --now` 后无法启动；手动绕过逾 2 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
+**背景**：2026-05-24 / 25 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 8 个 bug（其中 6 个是阻断性的，1 个是代码型 type bug），使 `xtrade-supervisor.service` / `xtrade-bridge.service` 在 `systemctl enable --now` 后无法启动；手动绕过逾 2 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
 
 **Bug 1 — uv Python 工具链落在 `/root` 下，xtrade 用户无法 traverse**
 
@@ -304,10 +304,20 @@ VPS 文件布局新增：
   2. 没有该 hint 时 fall back 到当前 cwd 的 `.env`（dev 模式行为不变）；
   3. 加 unit test 覆盖两种模式。
 
+**Bug 8 — `load_rules_from_yaml` signature 只收 `Path`，supervisor 传 `str` 即崩**
+
+- 现象：env 凭据齐了之后 supervisor 再崩，traceback 落在 `src/xtrade/risk/rules.py:258`：`AttributeError: 'str' object has no attribute 'exists'`。
+- 根因：`load_supervisor_config` 中 `raw["risk_yaml"]`（yaml.safe_load 返回的原生 str）直接喂给 `load_rules_from_yaml(path: Path)`；该函数 signature 只声明 `Path` 且立即调用 `path.exists()`。同模块兄弟函数 `load_venues(path: str | Path)` 已经做了 `Path(path)` 兜底，risk loader 没跟上。
+- 修复（已 commit `b2934ad`）：
+  - `load_rules_from_yaml(path: str | Path)`，函数体首行 `path = Path(path)` 兜底；
+  - 新增回归测试 `tests/test_risk_rules.py::test_load_rules_from_yaml_accepts_str_path`，用 `str(yaml_path)` 入参，老 signature 必 fail。
+- 反思：测试 fixture `_write_supervisor_yaml` 从未填 `risk_yaml` / `venues_yaml`，整条 prod 装载路径在 Phase 4 离线测试中**根本没被跑过**。Phase 5 A6 需补 `tests/test_cli_live_supervise.py::test_supervisor_loads_real_risk_yaml`，强制走 risk loader + venues loader。
+
 **验收**
 
 - `tests/test_install_vps_script.py`（新增）：lint installer 脚本中存在 `UV_PYTHON_INSTALL_DIR` export 与 `supervisor.example.yaml` seed 行；regex 锁住路径不再为 `~/.local`。
 - `tests/test_env_yaml_consistency.py`（新增）：env 模板与 venues YAML 引用集合完全一致。
+- `tests/test_cli_live_supervise.py`：现有 fixture 扩展，覆盖 `risk_yaml` + `venues_yaml` 完整加载路径。
 - VPS 复现：在干净 OpenCloudOS 9.x VPS 上 `bash install_vps.sh --release-tarball ...` 一次跑通到 `xtrade-supervisor.service` `active` 状态（除 `/etc/xtrade/env` 凭据外无需任何手动步骤）；命令日志归档到 `docs/phase5_results.md` §A6。
 - 旧 VPS（已踩到 bug 的本机）：可选回归测试，`uninstall_vps.sh` 完全清理后再走一遍 installer。
 
