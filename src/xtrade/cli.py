@@ -45,6 +45,7 @@ approve_app = typer.Typer(help="Phase 3 approval queue: list / confirm / reject 
 risk_app = typer.Typer(help="Phase 3.5 risk calibration: pre-flight strategy + risk.yaml without I/O.")
 bridge_app = typer.Typer(help="Phase 4 openclaw bridge: localhost callback receiver.")
 ops_app = typer.Typer(help="Phase 4 ops: status / pause / resume / kill (pure file-system; safe to call when supervisor is dead).")
+research_app = typer.Typer(help="Phase 5 Track B research: news sentiment pipeline + ML baseline trainer (offline / local only).")
 
 app.add_typer(data_app, name="data")
 app.add_typer(backtest_app, name="backtest")
@@ -56,6 +57,7 @@ app.add_typer(approve_app, name="approve")
 app.add_typer(risk_app, name="risk")
 app.add_typer(bridge_app, name="bridge")
 app.add_typer(ops_app, name="ops")
+app.add_typer(research_app, name="research")
 
 
 # ---------------------------------------------------------------------------
@@ -1920,6 +1922,100 @@ def risk_dry_run(
 
     if report.intents_generated == 0:
         typer.echo("\nNote: strategy emitted no intent for this signal/account combo.")
+
+
+# ---------------------------------------------------------------------------
+# `research` subcommands (Phase 5 / Track B). All heavy imports
+# (pandas, sklearn, lightgbm) are LAZY — done inside command bodies so
+# `xtrade bridge serve` / `xtrade live supervise` do not pull these into
+# the supervisor / bridge process. The `tests/test_research_import_isolation.py`
+# guard enforces this contract.
+# ---------------------------------------------------------------------------
+
+
+@research_app.command("news")
+def research_news(
+    instrument: str = typer.Option(..., "--instrument", help="Nautilus instrument id (e.g. BTCUSDT-PERP.BINANCE)."),
+    since: str = typer.Option(..., "--since", help="UTC ISO start (inclusive)."),
+    until: str = typer.Option(..., "--until", help="UTC ISO end (exclusive)."),
+    sources: list[str] = typer.Option(["rss"], "--source", help="Repeatable source subdir under raw_root."),
+    scorer: str = typer.Option("vader", "--scorer", help="Registered scorer name."),
+    raw_root: Path = typer.Option(Path("data/research/news_raw"), "--raw-root"),
+    out_root: Path = typer.Option(Path("data/research/news_sentiment"), "--out-root"),
+    keywords_map: Path = typer.Option(
+        Path("config/research/news_keywords.example.yaml"), "--keywords-map"
+    ),
+) -> None:
+    """Materialise per-day sentiment Parquet for `instrument`."""
+
+    from xtrade.research.news import build_sentiment_features  # noqa: PLC0415
+
+    since_dt = dt.datetime.fromisoformat(since.replace("Z", "+00:00"))
+    until_dt = dt.datetime.fromisoformat(until.replace("Z", "+00:00"))
+    written = build_sentiment_features(
+        instrument=instrument,
+        since=since_dt,
+        until=until_dt,
+        sources=sources,
+        scorer=scorer,
+        raw_root=raw_root,
+        out_root=out_root,
+        keywords_map_path=keywords_map,
+    )
+    for p in written:
+        typer.echo(str(p))
+    typer.echo(f"wrote {len(written)} parquet shard(s)")
+
+
+@research_app.command("train")
+def research_train(
+    instrument: str = typer.Option(..., "--instrument", help="Nautilus instrument id."),
+    model: str = typer.Option("logistic", "--model", help="logistic | lightgbm."),
+    seed: int = typer.Option(42, "--seed"),
+    horizon_min: int = typer.Option(15, "--horizon-min"),
+    train_start: str = typer.Option(..., "--train-start", help="UTC ISO."),
+    train_end: str = typer.Option(..., "--train-end"),
+    val_start: str = typer.Option(..., "--val-start"),
+    val_end: str = typer.Option(..., "--val-end"),
+    test_start: str = typer.Option(..., "--test-start"),
+    test_end: str = typer.Option(..., "--test-end"),
+    ohlcv_root: Path = typer.Option(Path("data/research/ohlcv"), "--ohlcv-root"),
+    sentiment_root: Path = typer.Option(
+        Path("data/research/news_sentiment"), "--sentiment-root"
+    ),
+    out_root: Path = typer.Option(Path("models"), "--out-root"),
+) -> None:
+    """Train one ML baseline on `instrument` and persist to `models/<run_id>/`."""
+
+    from xtrade.research.dataset import build_dataset  # noqa: PLC0415
+    from xtrade.research.train import run_training  # noqa: PLC0415
+
+    def _p(s: str) -> dt.datetime:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+    bundle = build_dataset(
+        instrument=instrument,
+        ohlcv_root=ohlcv_root,
+        sentiment_root=sentiment_root,
+        horizon_min=horizon_min,
+        train_window=(_p(train_start), _p(train_end)),
+        val_window=(_p(val_start), _p(val_end)),
+        test_window=(_p(test_start), _p(test_end)),
+        label_mode="classification",
+    )
+    result = run_training(
+        bundle,
+        model_name=model,  # type: ignore[arg-type]
+        seed=seed,
+        out_root=out_root,
+    )
+    typer.echo(f"run_id={result.run_id}")
+    typer.echo(f"model_path={result.model_path}")
+    typer.echo(f"val: auc={result.metrics['auc']:.4f} acc={result.metrics['accuracy']:.4f} ic={result.metrics['ic']:.4f}")
+    typer.echo(
+        f"test: auc={result.metrics['auc_test']:.4f} "
+        f"acc={result.metrics['accuracy_test']:.4f} ic={result.metrics['ic_test']:.4f}"
+    )
 
 
 def main() -> None:  # pragma: no cover - thin shim

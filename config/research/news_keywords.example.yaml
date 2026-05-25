@@ -1,0 +1,29 @@
+# Phase 5 / B1 — instrument → keyword map for the news sentiment pipeline.
+#
+# Each entry maps a Nautilus-style instrument id to a list of
+# case-insensitive keywords. An article is associated with the
+# instrument if its title/body contains ANY of these keywords as a
+# substring, OR its `tags` array contains one verbatim (case-folded).
+#
+# Keep lists short and high-precision: false positives from generic
+# terms (e.g. "coin", "money") inject noise into the ML features.
+
+BTCUSDT-PERP.BINANCE:
+  - bitcoin
+  - btc
+  - btc-usd
+  - btcusd
+  - btcusdt
+
+ETHUSDT-PERP.BINANCE:
+  - ethereum
+  - ether
+  - eth
+  - ethusd
+  - ethusdt
+
+# Hyperliquid example — add per dex/ticker as needed. The xyz:TSLA-USD
+# syntax mirrors `xtrade.data.instruments.resolve("hyperliquid", "xyz:TSLA")`.
+"xyz:TSLA-USD-PERP.HYPERLIQUID":
+  - tsla
+  - tesla

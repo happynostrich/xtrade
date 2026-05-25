@@ -23,14 +23,29 @@ Safety boundary
 This plugin emits `OrderIntent` only. It does NOT touch
 `SignalQueue`, Nautilus `Order`, or the venue API. The runner alone
 funnels intents through risk + approval → execution.
+
+Optional ML gate (Phase 5 / B4)
+-------------------------------
+The plugin accepts an `ml_gate` config block. When `enabled=True`,
+the trained baseline at `model_path` is loaded once at construction
+and consulted after each rule-side intent. Intents whose ML score is
+below `score_threshold` (or whose ML direction disagrees, when
+`direction_check=True`) are SUPPRESSED — the strategy still emits a
+structured `strategy.ml_gate.suppressed` event so the paper / live
+audit trail can show why an intent didn't fire.
+
+Default is `enabled=False` (Phase 3 behaviour, no model loaded).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Iterable
 from decimal import ROUND_DOWN, Decimal
+from typing import TYPE_CHECKING
 
+from xtrade.obs import emit_event
 from xtrade.research.signals import Signal
 from xtrade.strategy.base import (
     AccountSnapshot,
@@ -39,9 +54,14 @@ from xtrade.strategy.base import (
 )
 from xtrade.strategy.intent import OrderIntent
 
+if TYPE_CHECKING:  # pragma: no cover - typing-only import
+    from xtrade.research.ml_gate import MLGate, MLGateConfig
+
 
 _DEFAULT_NOTIONAL_USD = Decimal("100")
 _DEFAULT_QTY_STEP = Decimal("0.001")
+
+_log = logging.getLogger("xtrade.strategy.momentum_follow")
 
 
 @register_strategy("momentum_follow")
@@ -65,6 +85,18 @@ class MomentumFollow(SignalDrivenStrategy):
                 f"qty_step must be > 0, got {self.qty_step}"
             )
 
+        # ML gate (Phase 5 / B4). Lazy-import so disabled gate keeps the
+        # supervisor import-graph free of sklearn / lightgbm.
+        self._ml_gate_config: "MLGateConfig | None" = None
+        self._ml_gate: "MLGate | None" = None
+        raw_gate = self.config.get("ml_gate")
+        if raw_gate:
+            from xtrade.research.ml_gate import MLGate, MLGateConfig  # noqa: PLC0415
+
+            self._ml_gate_config = MLGateConfig.from_mapping(raw_gate)
+            if self._ml_gate_config.enabled:
+                self._ml_gate = MLGate(self._ml_gate_config)
+
     # ---- override -------------------------------------------------------
 
     def on_signal(
@@ -81,7 +113,7 @@ class MomentumFollow(SignalDrivenStrategy):
 
         if signal.direction == "FLAT":
             close = self._close_intent(signal, position, ts)
-            return [close] if close is not None else []
+            return self._apply_ml_gate([close] if close is not None else [], signal)
 
         if signal.direction == "LONG":
             out: list[OrderIntent] = []
@@ -99,7 +131,7 @@ class MomentumFollow(SignalDrivenStrategy):
                     out.append(self._make_intent(
                         signal, side="BUY", qty=qty, reduce_only=False, ts=ts,
                     ))
-            return out
+            return self._apply_ml_gate(out, signal)
 
         if signal.direction == "SHORT":
             out = []
@@ -115,9 +147,73 @@ class MomentumFollow(SignalDrivenStrategy):
                     out.append(self._make_intent(
                         signal, side="SELL", qty=qty, reduce_only=False, ts=ts,
                     ))
-            return out
+            return self._apply_ml_gate(out, signal)
 
         return []
+
+    # ---- ML gate (Phase 5 / B4) ----------------------------------------
+
+    def _apply_ml_gate(
+        self,
+        intents: list[OrderIntent],
+        signal: Signal,
+    ) -> list[OrderIntent]:
+        """Filter `intents` through the ML gate if configured.
+
+        Reduce-only closes (any direction) are PASSED THROUGH unchanged
+        even when the gate is enabled — closing an existing position is
+        a risk-reduction action that should not be blocked by a model
+        prediction. Only opening intents go through the gate.
+
+        Emits one `strategy.ml_gate.suppressed` event per dropped intent.
+        """
+        if not intents or self._ml_gate is None:
+            return intents
+        gate = self._ml_gate
+        passed: list[OrderIntent] = []
+        features = self._build_gate_features(signal)
+        for intent in intents:
+            if intent.reduce_only:
+                passed.append(intent)
+                continue
+            decision = gate.decide(side=intent.side, features=features)
+            if decision.allow:
+                passed.append(intent)
+                continue
+            emit_event(
+                _log,
+                "strategy.ml_gate.suppressed",
+                signal_symbol=signal.symbol,
+                signal_direction=signal.direction,
+                intent_side=intent.side,
+                model_score=round(float(decision.score), 6),
+                threshold=float(gate.config.score_threshold),
+                direction_check=bool(gate.config.direction_check),
+                reason=decision.reason,
+                source_signal_id=intent.source_signal_id,
+            )
+        return passed
+
+    def _build_gate_features(self, signal: Signal) -> dict[str, float]:
+        """Best-effort feature mapping built from `signal` only.
+
+        The strategy does not (yet) ingest OHLCV rolling stats; missing
+        features fall back to 0.0 inside `MLGate.score` with a one-time
+        warning. Sentiment values can be threaded via `signal.metadata`
+        keys ``sentiment_score`` / ``sentiment_score_lag_1h`` when the
+        scanner has them; otherwise 0.0.
+        """
+        from xtrade.research.ml_gate import build_features_from_signal  # noqa: PLC0415
+
+        meta = signal.metadata if isinstance(signal.metadata, dict) else {}
+        sentiment_score = float(meta.get("sentiment_score", 0.0))
+        sentiment_lag = float(meta.get("sentiment_score_lag_1h", 0.0))
+        return build_features_from_signal(
+            signal_strength=float(signal.strength),
+            direction=signal.direction,
+            sentiment_score=sentiment_score,
+            sentiment_score_lag_1h=sentiment_lag,
+        )
 
     # ---- helpers --------------------------------------------------------
 
