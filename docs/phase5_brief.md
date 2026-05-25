@@ -230,7 +230,7 @@ VPS 文件布局新增：
 
 #### Task A6 —— installer hardening（2026-05-24 VPS 首装实测发现）
 
-**背景**：2026-05-24 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 4 个 bug（其中 3 个是阻断性的），使 `xtrade-supervisor.service` 在 `systemctl enable --now` 后无法启动；手动绕过 ~1 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
+**背景**：2026-05-24 / 25 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 5 个 bug（其中 4 个是阻断性的），使 `xtrade-supervisor.service` / `xtrade-bridge.service` 在 `systemctl enable --now` 后无法启动；手动绕过逾 1 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
 
 **Bug 1 — uv Python 工具链落在 `/root` 下，xtrade 用户无法 traverse**
 
@@ -261,6 +261,16 @@ VPS 文件布局新增：
 
 - 现象：`xtrade-supervisor.service` 在 EACCES 阶段每 10 秒重启，60 次后被 systemd 限流；journal 被刷满。
 - 修复：unit 增加 `StartLimitBurst=5` + `StartLimitIntervalSec=120`，超过即 `failed` 不再 restart，避免 5 分钟内刷 30 条 EACCES。
+
+**Bug 5 — `xtrade bridge serve` 启动即 OOM-killed（cgroup MemoryMax=200M）**
+
+- 现象：`xtrade-bridge.service` 在新装 VPS 上启动 ~10s 后被 systemd OOM killer 终结：`Memory: 198.2M (max: 200.0M ... peak: 199.6M)` → `status=9/KILL Failed with result 'oom-kill'`；同一容器内的 supervisor 用 `MemoryMax=1500M` 反而正常。bridge 是个 stdlib HTTP 监听器，理论上几十 MB 就够。
+- 根因：CLI 顶层 `import xtrade.cli` 强制导入 vectorbt/numba（research stack），而 `xtrade bridge serve` 是 webhook receiver 完全不需要这些重量级依赖。冷启动 vectorbt + numba JIT 初始化轻松吃满 ~200 MB。
+- 修复方向（择一或同时）：
+  1. **CLI 懒加载**：把 `xtrade.cli` 顶层的 `import xtrade.research.*` / `import vectorbt` 全部下推到具体子命令 `scan` / `backtest` 函数体内，使 `xtrade bridge serve` / `xtrade ops *` / `xtrade live supervise` 启动只载入 stdlib + nautilus 核心（目标 RSS < 80 MB）。
+  2. **unit 短期兜底**：把 bridge unit `MemoryMax` 从 200M 调到 512M（或安装脚本计算 nautilus 基线 + 100 MB headroom）。
+  3. 在 `tests/test_cli_import_footprint.py`（新增）锁住：`python -X importtime -c 'import xtrade.cli'` 输出不得包含 `vectorbt` 或 `numba` 行（regex 守护）。
+- 验收：fresh VPS 上 `systemctl start xtrade-bridge` 后 30s 仍然 active，`Memory: <100M`；同时 `xtrade bridge serve --help` 在 Mac 本地 `/usr/bin/time -l` 测得 RSS < 80 MB。
 
 **Bug 4 — numba JIT cache locator 在 systemd 沙箱下无落点**
 
