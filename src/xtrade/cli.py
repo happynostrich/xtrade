@@ -1146,6 +1146,11 @@ def ops_status(
         "--logs-root",
         help="Run logs root: scanned for the most recent <run-id>/live_signal_summary.json.",
     ),
+    var_root: Path = typer.Option(
+        Path("/var/lib/xtrade"),
+        "--var-root",
+        help="xtrade data volume root (used by the disk-capacity probe; default /var/lib/xtrade).",
+    ),
     supervisor_unit: str = typer.Option(
         "xtrade-supervisor.service",
         "--supervisor-unit",
@@ -1173,6 +1178,7 @@ def ops_status(
         cursor_path=cursor_path,
         sentinel_path=sentinel_path,
         logs_root=logs_root,
+        var_root=var_root,
         supervisor_unit=supervisor_unit,
     )
     status = collect_status(paths)

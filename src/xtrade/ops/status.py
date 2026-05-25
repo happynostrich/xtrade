@@ -47,6 +47,7 @@ from typing import Any, Callable
 
 from xtrade.approval.queue import ApprovalQueue
 from xtrade.live.sentinel import Sentinel
+from xtrade.ops.disk import DiskState, check_disk
 
 
 # ---- defaults & paths ---------------------------------------------------
@@ -58,6 +59,7 @@ DEFAULT_APPROVALS_ROOT = Path("/var/lib/xtrade/approvals")
 DEFAULT_CURSOR_PATH = Path("/var/lib/xtrade/signals/.cursor")
 DEFAULT_LOGS_ROOT = Path("/var/lib/xtrade/logs")
 DEFAULT_AUDIT_ROOT = Path("/var/lib/xtrade/audit")
+DEFAULT_VAR_ROOT = Path("/var/lib/xtrade")
 DEFAULT_SUPERVISOR_UNIT = "xtrade-supervisor.service"
 
 
@@ -75,6 +77,7 @@ class OpsPaths:
     sentinel_path: Path = DEFAULT_SENTINEL_PATH
     logs_root: Path = DEFAULT_LOGS_ROOT
     audit_root: Path = DEFAULT_AUDIT_ROOT
+    var_root: Path = DEFAULT_VAR_ROOT
     supervisor_unit: str = DEFAULT_SUPERVISOR_UNIT
 
     @classmethod
@@ -181,6 +184,7 @@ class OpsStatus:
     last_fill_passed: bool | None
     bridge: BridgeStatus
     ml_gate: MLGateStatus
+    disk: DiskState
     collected_at: str
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -198,6 +202,13 @@ class OpsStatus:
             "last_fill_passed": self.last_fill_passed,
             "bridge": self.bridge.to_dict(),
             "ml_gate": self.ml_gate.to_dict(),
+            "disk": {
+                "path": str(self.disk.path),
+                "used_pct": self.disk.used_pct,
+                "free_bytes": self.disk.free_bytes,
+                "warning": self.disk.warning,
+                "halt": self.disk.halt,
+            },
             "collected_at": self.collected_at,
         }
 
@@ -238,6 +249,7 @@ def collect_status(
     )
     bridge = _read_last_bridge_dispatch(paths.approvals_root)
     ml_gate = _read_ml_gate_audit(paths.audit_root, now=when)
+    disk = check_disk(paths.var_root)
     supervisor = probe(paths.supervisor_unit)
 
     return OpsStatus(
@@ -254,6 +266,7 @@ def collect_status(
         last_fill_passed=last_fill_passed,
         bridge=bridge,
         ml_gate=ml_gate,
+        disk=disk,
         collected_at=when.astimezone(dt.timezone.utc).isoformat(),
     )
 
@@ -625,6 +638,11 @@ def render_status_text(status: OpsStatus) -> str:
         f" suppression_rate={_fmt_pct(status.ml_gate.suppression_rate_24h)}"
         f" last_event_age_s={_fmt_float(status.ml_gate.last_event_age_s)}"
     )
+    lines.append(
+        f"xtrade.ops disk used_pct={status.disk.used_pct}"
+        f" warning={str(status.disk.warning).lower()}"
+        f" halt={str(status.disk.halt).lower()}"
+    )
     return "\n".join(lines)
 
 
@@ -662,10 +680,13 @@ __all__ = [
     "DEFAULT_SENTINEL_PATH",
     "DEFAULT_SIGNALS_ROOT",
     "DEFAULT_SUPERVISOR_UNIT",
+    "DEFAULT_VAR_ROOT",
+    "DiskState",
     "MLGateStatus",
     "OpsPaths",
     "OpsStatus",
     "SupervisorState",
+    "check_disk",
     "collect_status",
     "probe_systemd_default",
     "render_status_json",

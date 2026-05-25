@@ -132,6 +132,16 @@ class SupervisorConfig:
     # writer" — the bridge dispatches behave exactly like Phase 4.
     # Production yaml sets this to `/var/lib/xtrade/audit`.
     audit_root: Path | None = None
+    # Phase 5 A4 — disk-capacity guard. Each iteration probes
+    # `shutil.disk_usage(var_root)` and turns `disk.halt=True` (used_pct
+    # crosses `disk_halt_pct`) into a `sentinel.pause(reason=
+    # "disk-exhausted")` + a `supervisor.disk.exhausted` event. The
+    # `warning` threshold is operator-visible only (it surfaces in
+    # `xtrade ops status`); it never pauses the supervisor on its own.
+    # Production yaml sets `var_root` to `/var/lib/xtrade`.
+    var_root: Path | None = None
+    disk_warn_pct: int = 80
+    disk_halt_pct: int = 90
 
 
 @dataclasses.dataclass(frozen=True)
@@ -390,6 +400,46 @@ def _supervisor_iteration(
     pending: dict[str, _PendingIntent],
     now: Callable[[], dt.datetime],
 ) -> SupervisorIterationResult:
+    # Phase 5 A4 — disk-capacity guard. Probe the data volume BEFORE
+    # reading the sentinel so a `disk.halt=True` outcome itself writes
+    # the sentinel; the same iteration then falls through the existing
+    # `paused` branch below (so the operator-visible behaviour is the
+    # familiar "supervisor paused" pattern). Only runs when the
+    # operator opted in by setting `var_root` in supervisor.yaml; tests
+    # that build a `SupervisorConfig` without `var_root` skip the probe
+    # entirely, preserving Phase 4 behaviour.
+    if config.var_root is not None:
+        from xtrade.ops.disk import check_disk  # noqa: PLC0415
+
+        disk = check_disk(
+            config.var_root,
+            warn_pct=config.disk_warn_pct,
+            halt_pct=config.disk_halt_pct,
+        )
+        if disk.halt and not sentinel.paused():
+            sentinel.pause(reason="disk-exhausted", now=now())
+            emit_event(
+                log,
+                "supervisor.disk.exhausted",
+                level=logging.ERROR,
+                iteration=iteration,
+                path=str(disk.path),
+                used_pct=disk.used_pct,
+                free_bytes=disk.free_bytes,
+                halt_pct=config.disk_halt_pct,
+            )
+        elif disk.warning and not disk.halt:
+            emit_event(
+                log,
+                "supervisor.disk.warning",
+                level=logging.WARNING,
+                iteration=iteration,
+                path=str(disk.path),
+                used_pct=disk.used_pct,
+                free_bytes=disk.free_bytes,
+                warn_pct=config.disk_warn_pct,
+            )
+
     paused = sentinel.paused()
 
     # Phase 1 of an iteration: promote any pending-manual rows that the
@@ -806,4 +856,7 @@ def load_supervisor_config(
         bridge=bridge,
         persistent_node=bool(raw.get("persistent_node", True)),
         audit_root=Path(raw["audit_root"]) if raw.get("audit_root") else None,
+        var_root=Path(raw["var_root"]) if raw.get("var_root") else None,
+        disk_warn_pct=int(raw.get("disk_warn_pct", 80)),
+        disk_halt_pct=int(raw.get("disk_halt_pct", 90)),
     )

@@ -14,6 +14,7 @@ Submodules
   and human/json renderers used by the CLI.
 """
 
+from xtrade.ops.disk import DiskState, check_disk
 from xtrade.ops.status import (
     BridgeStatus,
     MLGateStatus,
@@ -28,10 +29,12 @@ from xtrade.ops.status import (
 
 __all__ = [
     "BridgeStatus",
+    "DiskState",
     "MLGateStatus",
     "OpsPaths",
     "OpsStatus",
     "SupervisorState",
+    "check_disk",
     "collect_status",
     "probe_systemd_default",
     "render_status_json",

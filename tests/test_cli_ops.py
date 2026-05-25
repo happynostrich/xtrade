@@ -28,6 +28,7 @@ from xtrade.approval.queue import ApprovalQueue
 from xtrade.cli import app
 from xtrade.ops import (
     BridgeStatus,
+    DiskState,
     OpsPaths,
     OpsStatus,
     SupervisorState,
@@ -347,6 +348,13 @@ def _rich_status() -> OpsStatus:
             last_dispatch_attempts=1,
         ),
         ml_gate=MLGateStatus(),
+        disk=DiskState(
+            path=Path("/var/lib/xtrade"),
+            used_pct=63,
+            free_bytes=10_000_000_000,
+            warning=False,
+            halt=False,
+        ),
         collected_at="2026-05-24T12:05:00+00:00",
     )
 
