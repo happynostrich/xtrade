@@ -30,11 +30,15 @@ first time, individually thereafter when re-validating a change.
    ```
    File mode must be `640 root:xtrade`. The xtrade systemd units source
    it via `EnvironmentFile=`; never commit it.
-4. A release tarball built on the dev mac:
+4. A release tarball built on the dev mac. The tarball must be **flat**
+   (no leading `xtrade/` prefix) — `install_vps.sh` does a plain
+   `tar -xzf … -C "$RELEASE_DIR"` without `--strip-components`, so any
+   prefix lands `pyproject.toml` one directory too deep and `pip install`
+   fails:
    ```bash
    # local mac:
    git -C ~/xtrade archive --format=tar.gz \
-       --prefix=xtrade/ -o /tmp/xtrade-$(git -C ~/xtrade rev-parse --short HEAD).tar.gz HEAD
+       -o /tmp/xtrade-$(git -C ~/xtrade rev-parse --short HEAD).tar.gz HEAD
    scp /tmp/xtrade-*.tar.gz vps:/tmp/
    ```
 
@@ -42,11 +46,14 @@ first time, individually thereafter when re-validating a change.
 
 ## 1. Install (first time on a fresh host)
 
+Stage the installer script into a temp directory (the tarball is flat,
+so extracting `cd /tmp; tar xzf …` would scatter files across `/tmp`):
+
 ```bash
 # on the VPS, as root
-cd /tmp
-tar xzf xtrade-<sha>.tar.gz
-sudo bash xtrade/scripts/phase4/install_vps.sh \
+rm -rf /tmp/xtrade-staging && mkdir /tmp/xtrade-staging
+tar xzf /tmp/xtrade-<sha>.tar.gz -C /tmp/xtrade-staging
+sudo bash /tmp/xtrade-staging/scripts/phase4/install_vps.sh \
     --release-tarball /tmp/xtrade-<sha>.tar.gz
 ```
 
@@ -58,7 +65,7 @@ all four units (`xtrade-supervisor.service`, `xtrade-bridge.service`,
 Smoke-check immediately after:
 
 ```bash
-sudo /tmp/xtrade/scripts/phase4/05_smoke_postdeploy.sh
+sudo /tmp/xtrade-staging/scripts/phase4/05_smoke_postdeploy.sh
 sudo -u xtrade /opt/xtrade/.venv/bin/xtrade ops status
 ```
 
@@ -71,9 +78,9 @@ non-empty `supervisor.state` (active).
 
 ```bash
 # on the VPS
-cd /tmp
-tar xzf xtrade-<new-sha>.tar.gz
-sudo bash xtrade/scripts/phase4/install_vps.sh \
+rm -rf /tmp/xtrade-staging && mkdir /tmp/xtrade-staging
+tar xzf /tmp/xtrade-<new-sha>.tar.gz -C /tmp/xtrade-staging
+sudo bash /tmp/xtrade-staging/scripts/phase4/install_vps.sh \
     --release-tarball /tmp/xtrade-<new-sha>.tar.gz
 ```
 
