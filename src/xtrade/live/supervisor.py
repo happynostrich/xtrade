@@ -125,6 +125,13 @@ class SupervisorConfig:
     # behaviour, which is retained as a kill-switch only. Has no effect
     # when `venues_cfg` is None or `live_executor` is injected by tests.
     persistent_node: bool = True
+    # Phase 5 A2 — when set, the supervisor builds a `BridgeAuditWriter`
+    # rooted here and attaches it to the `OpenclawBridge` it received,
+    # so every outbound dispatch attempt lands in
+    # `audit_root/bridge_out.<YYYY-MM-DD>.jsonl`. `None` means "no audit
+    # writer" — the bridge dispatches behave exactly like Phase 4.
+    # Production yaml sets this to `/var/lib/xtrade/audit`.
+    audit_root: Path | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +238,18 @@ def run_supervisor(
             # intent. Tests that inject their own executor stay on
             # this branch (live_executor was provided).
             from xtrade.live.runner import run_live as live_executor  # noqa: PLC0415
+
+    # Phase 5 A2 — attach the bridge audit writer if both halves are
+    # configured. The bridge stays usable without an audit writer (Phase
+    # 4 behaviour); we only enable jsonl auditing when the operator
+    # opts in via `audit_root` in supervisor.yaml.
+    if config.bridge is not None and config.audit_root is not None:
+        from xtrade.bridge.audit import BridgeAuditWriter  # noqa: PLC0415
+
+        # Idempotent: attaching twice (e.g. on restart) just replaces
+        # the previous writer instance. The old fd is never held open
+        # so there's no leak.
+        config.bridge._audit_writer = BridgeAuditWriter(config.audit_root)
 
     queue = SignalQueue(config.signals_root)
     consumer = SignalConsumer(
@@ -786,4 +805,5 @@ def load_supervisor_config(
         venues_cfg=venues_cfg,
         bridge=bridge,
         persistent_node=bool(raw.get("persistent_node", True)),
+        audit_root=Path(raw["audit_root"]) if raw.get("audit_root") else None,
     )

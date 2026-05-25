@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping
 import httpx
 
 from xtrade.approval.queue import ApprovalQueue, ApprovalRecord
+from xtrade.bridge.audit import BridgeAuditWriter
 from xtrade.bridge.schema import (
     BridgePayload,
     SecretLeakError,
@@ -92,6 +93,7 @@ class OpenclawBridge:
         read_timeout_s: float = DEFAULT_READ_TIMEOUT_S,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], dt.datetime] | None = None,
+        audit_writer: BridgeAuditWriter | None = None,
     ) -> None:
         if not gateway_url.startswith(("http://", "https://")):
             raise BridgeConfigError(
@@ -114,6 +116,10 @@ class OpenclawBridge:
         self._backoffs = backoffs
         self._sleep = sleep
         self._now = now or (lambda: dt.datetime.now(tz=dt.timezone.utc))
+        # Phase 5 A2 — outbound audit jsonl. Optional so existing tests
+        # that don't care about audit can omit it. When None, dispatch
+        # behaves exactly like Phase 4 (no audit rows written).
+        self._audit_writer = audit_writer
 
         if client is not None:
             self._client = client
@@ -207,6 +213,17 @@ class OpenclawBridge:
                 reason="secret-scrub",
                 error=str(exc),
             )
+            # Phase 5 A2 — audit the refusal. `error` is scrubbed to the
+            # exception class name only; we never embed the raw secret.
+            self._audit(
+                approval_id=record.id,
+                attempt=0,
+                kind="refused",
+                status_code=None,
+                error=f"secret-scrub: {type(exc).__name__}",
+                elapsed_s=0.0,
+                response_excerpt=None,
+            )
             return result
 
         target = f"{self._gateway}/plugins/webhooks/xtrade"
@@ -239,6 +256,16 @@ class OpenclawBridge:
                         attempts=attempts,
                         elapsed_s=round(elapsed, 3),
                     )
+                    # Phase 5 A2 — successful attempt audit row.
+                    self._audit(
+                        approval_id=record.id,
+                        attempt=attempts,
+                        kind="ok",
+                        status_code=resp.status_code,
+                        error=None,
+                        elapsed_s=elapsed,
+                        response_excerpt=last_excerpt,
+                    )
                     return self._record_success(
                         record,
                         status_code=resp.status_code,
@@ -266,6 +293,17 @@ class OpenclawBridge:
                     error=last_error,
                     sleep_s=round(backoff, 3),
                 )
+                # Phase 5 A2 — per-attempt retry audit row, captured BEFORE
+                # the sleep so it shows up promptly under `journalctl -f`.
+                self._audit(
+                    approval_id=record.id,
+                    attempt=attempts,
+                    kind="retry",
+                    status_code=last_status,
+                    error=last_error,
+                    elapsed_s=time.monotonic() - start,
+                    response_excerpt=last_excerpt,
+                )
                 self._sleep(backoff)
 
         elapsed = time.monotonic() - start
@@ -278,6 +316,17 @@ class OpenclawBridge:
             last_error=last_error,
             elapsed_s=round(elapsed, 3),
         )
+        # Phase 5 A2 — terminal fail audit row (covers both "5xx exhausted"
+        # and "4xx no-retry break" paths; `last_status` distinguishes them).
+        self._audit(
+            approval_id=record.id,
+            attempt=attempts,
+            kind="fail",
+            status_code=last_status,
+            error=last_error or "unknown",
+            elapsed_s=elapsed,
+            response_excerpt=last_excerpt,
+        )
         return self._record_failure(
             record,
             ok=False,
@@ -287,6 +336,46 @@ class OpenclawBridge:
             error=last_error or "unknown",
             response_excerpt=last_excerpt,
         )
+
+    # ----- audit helpers --------------------------------------------------
+
+    def _audit(
+        self,
+        *,
+        approval_id: str,
+        attempt: int,
+        kind: str,
+        status_code: int | None,
+        error: str | None,
+        elapsed_s: float,
+        response_excerpt: str | None,
+    ) -> None:
+        """Best-effort audit append. Never raises out of dispatch.
+
+        Audit failures are logged but do not block delivery: the audit
+        log is observability, not the source of truth (the approval
+        queue annotations are). If the audit fd is hosed we want the
+        bridge to keep working.
+        """
+        if self._audit_writer is None:
+            return
+        try:
+            self._audit_writer.write(
+                approval_id=approval_id,
+                attempt=attempt,
+                kind=kind,  # type: ignore[arg-type]
+                status_code=status_code,
+                error=error,
+                dispatched_at=self._now(),
+                elapsed_s=elapsed_s,
+                response_excerpt=response_excerpt,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "bridge audit write failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     # ----- result + annotation helpers ------------------------------------
 
