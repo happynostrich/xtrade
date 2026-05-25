@@ -230,7 +230,7 @@ VPS 文件布局新增：
 
 #### Task A6 —— installer hardening（2026-05-24 VPS 首装实测发现）
 
-**背景**：2026-05-24 / 25 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 5 个 bug（其中 4 个是阻断性的），使 `xtrade-supervisor.service` / `xtrade-bridge.service` 在 `systemctl enable --now` 后无法启动；手动绕过逾 1 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
+**背景**：2026-05-24 / 25 在 OpenCloudOS 9.x VPS 上首次跑 `scripts/phase4/install_vps.sh` 共暴露 7 个 bug（其中 5 个是阻断性的），使 `xtrade-supervisor.service` / `xtrade-bridge.service` 在 `systemctl enable --now` 后无法启动；手动绕过逾 2 小时才上线。这些问题在 Phase 4 brief / runbook 都未涵盖，须在 Phase 5 收口。
 
 **Bug 1 — uv Python 工具链落在 `/root` 下，xtrade 用户无法 traverse**
 
@@ -286,9 +286,28 @@ VPS 文件布局新增：
      `HOME` 兜底其他库（如 polars / matplotlib）的 `~/.cache` 探测；`/var/lib/xtrade` 本来就在 `ReadWritePaths=`。
   3. `scripts/phase5/01_check_phase5_prereqs.sh` 增加 import-side-effect self-test：`sudo -u xtrade NUMBA_CACHE_DIR=/var/lib/xtrade/numba_cache HOME=/var/lib/xtrade /opt/xtrade/.venv/bin/python3 -c 'import vectorbt; print("vbt ok")'`。
 
+**Bug 6 — env 变量命名不一致：env 模板 vs venues YAML**
+
+- 现象：populate `/etc/xtrade/env` 时 operator 按 `deploy/env/xtrade.env.example` 写入 `BINANCE_TESTNET_API_KEY=...`，但 supervisor 启动报 `MissingCredentialError: BINANCE_FUTURES_TESTNET_API_KEY ...`，因为 `config/venues.binance_futures.testnet.yaml` 中 `api_key_env:` 引用的是**带 FUTURES 前缀**的名字。
+- 根因：env 模板（`deploy/env/xtrade.env.example`）与 venues YAML（`config/venues.binance_futures.testnet.yaml`）由不同任务在不同 phase 写就，命名约定从未统一；同理可能存在 `BINANCE_SPOT_TESTNET_*` / `HYPERLIQUID_TESTNET_*` 等变体。
+- 修复：
+  1. 选定**唯一权威命名**：以 venues YAML 的 `api_key_env` 值为准（更精细化、按 venue product 拆分），即 `BINANCE_FUTURES_TESTNET_API_KEY` / `BINANCE_FUTURES_TESTNET_API_SECRET` / `BINANCE_SPOT_TESTNET_API_KEY` / `BINANCE_SPOT_TESTNET_API_SECRET` / `HYPERLIQUID_TESTNET_PRIVATE_KEY` / `HYPERLIQUID_TESTNET_WALLET_ADDRESS`。
+  2. 改 `deploy/env/xtrade.env.example` 用上述权威命名；`tests/test_deploy_env_template.py` 的 `REQUIRED_KEYS` 同步更新。
+  3. 新增 `tests/test_env_yaml_consistency.py`：扫 `config/venues.*.yaml` 抽出 `*_env:` 引用，与 env 模板 keys 做集合差，缺一即 fail。
+
+**Bug 7 — `MissingCredentialError` 报错路径写死，误导 operator**
+
+- 现象：错误信息显示 `Please add ... to your .env file at /opt/xtrade/.venv/lib/python3.12/.env`，但 VPS 实际加载的是 `/etc/xtrade/env`（由 systemd `EnvironmentFile=` 注入，不是 python-dotenv 读盘）。operator 按提示去 venv 内创建 `.env` 文件毫无作用。
+- 根因：`xtrade/utils/env.py`（约 `_ENV_PATH` 常量附近）硬编码相对 `__file__` 的 `.env` 路径，没有感知 systemd 部署模式。
+- 修复：
+  1. 让 `MissingCredentialError` 的 hint 文本根据 `os.environ.get("XTRADE_ENV_FILE")` 切换（systemd unit 注入 `Environment=XTRADE_ENV_FILE=/etc/xtrade/env`）；
+  2. 没有该 hint 时 fall back 到当前 cwd 的 `.env`（dev 模式行为不变）；
+  3. 加 unit test 覆盖两种模式。
+
 **验收**
 
 - `tests/test_install_vps_script.py`（新增）：lint installer 脚本中存在 `UV_PYTHON_INSTALL_DIR` export 与 `supervisor.example.yaml` seed 行；regex 锁住路径不再为 `~/.local`。
+- `tests/test_env_yaml_consistency.py`（新增）：env 模板与 venues YAML 引用集合完全一致。
 - VPS 复现：在干净 OpenCloudOS 9.x VPS 上 `bash install_vps.sh --release-tarball ...` 一次跑通到 `xtrade-supervisor.service` `active` 状态（除 `/etc/xtrade/env` 凭据外无需任何手动步骤）；命令日志归档到 `docs/phase5_results.md` §A6。
 - 旧 VPS（已踩到 bug 的本机）：可选回归测试，`uninstall_vps.sh` 完全清理后再走一遍 installer。
 
