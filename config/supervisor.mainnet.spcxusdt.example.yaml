@@ -1,0 +1,203 @@
+# xtrade supervisor configuration — Phase 6 SPCXUSDT mainnet template.
+#
+# Loaded by `xtrade live supervise --config <path>`
+# (src/xtrade/cli.py:954 → src/xtrade/live/supervisor.py:937
+# `load_supervisor_config`). This file is the **example** that ships
+# in the repo; installer copies it to `/etc/xtrade/supervisor.yaml`
+# (mode 0640, owned root:xtrade) on the production VPS.
+#
+# Phase 6 wiring map (docs/phase6_brief.md §4 配置与部署):
+#
+#   /etc/xtrade/supervisor.yaml           ← this file (copied + edited)
+#       │
+#       ├─ venues_yaml ───────────────→  venues.binance_futures.mainnet.yaml   (T1)
+#       ├─ risk_yaml ─────────────────→  risk.mainnet.yaml                     (T2)
+#       ├─ instrument_id ←─ resolved against instrument_meta.yaml             (T3)
+#       ├─ strategy_name + strategy_config ←── strategy.spcxusdt_short_mcap.yaml (T5)
+#       └─ (scanner runs as a separate unit) ←─ scanner.spcxusdt_threshold_ladder.yaml (T6)
+#
+# Adjacent units that read from /etc/xtrade/env (NOT from this yaml):
+#
+#   xtrade-scanner.service     — `xtrade scan run` with the scanner yaml
+#   xtrade-bridge.service      — `xtrade bridge serve` (T4 inbound approvals)
+#   01_daily_holding_report.sh — cron @ 00:05 UTC (T11 daily snapshot)
+#
+# Three pre-start locks (all enforced inside `run_supervisor`):
+#   Lock 1  scanner-side _assert_testnet_only — bypassed here (Lock 3 owns).
+#   Lock 2  _validate_enum accepts environment=LIVE on Binance.
+#   Lock 3  assert_mainnet_unlock — XTRADE_MAINNET_UNLOCK_TOKEN env var
+#           must match the first line of /etc/xtrade/mainnet_unlock
+#           (mode 0400 root:root). Operator creates this file by hand.
+#
+# Mainnet risk ceiling (assert_mainnet_risk_ceiling, called when
+# venues_cfg is mainnet): every cap below MUST be present AND tight.
+#   max_notional_per_order_usd  ≤ 200
+#   max_position_per_symbol_usd ≤ 200
+#   max_total_notional_usd      ≤ 200
+#   max_drawdown_pct            ≤ 0.05
+# These caps live in risk.mainnet.yaml; the supervisor will refuse to
+# start with `MainnetRiskTooLooseError` if any cap drifts looser.
+
+# ---------------------------------------------------------------------------
+# instrument + strategy
+# ---------------------------------------------------------------------------
+
+# Nautilus instrument id; must match a row in
+# config/instrument_meta.yaml (T3 MetaRegistry.get keyed by symbol).
+instrument_id: SPCXUSDT-PERP.BINANCE
+
+# Strategy plugin name. The plugin loader resolves this against
+# `xtrade.strategy.plugins.mcap_anchored_ladder` (T5; direction-
+# parameterised mcap-anchored ladder; SPCX uses direction=short).
+strategy_name: mcap_anchored_ladder
+
+# Strategy-specific config — *inlined* here because the supervisor
+# loader currently merges yaml dicts only at the top level. The values
+# below MUST match `config/strategy.spcxusdt_short_mcap.yaml` (which is
+# the source-of-truth template that lives in the repo for review).
+# When operating: edit BOTH files together and keep them in sync, or
+# pre-generate this block from the strategy yaml.
+#
+# Brief mapping (docs/phase6_brief.md §1 SPCX defaults):
+#   - heavy_entry @ $225 / 0.666 qty (= $150 margin × 1× lev)
+#   - dca_entry   @ $210 / 0.047 qty per UTC day (= $10 daily DCA)
+#   - 4-rung TP ladder at $2.0T / $1.6T / $1.2T / $0.8T mcap, 25 % each
+#   - soft kill ABOVE $3.5T mcap (mark ≈ $294.86); watcher cancels
+#     reduce-only TP orders and refuses re-entry.
+strategy_config:
+  direction: short
+  instrument: SPCXUSDT-PERP.BINANCE
+  venue: BINANCE
+  leverage: 1
+  mmr: '0.025'
+  target_mcap_liq_usd: '4000000000000'
+  heavy_entry:
+    trigger_mark_usd: '225'
+    qty: '0.666'
+  dca_entry:
+    trigger_mark_usd: '210'
+    qty: '0.047'
+  tp_ladder:
+    - { mcap_usd: '2000000000000', fraction: '0.25' }
+    - { mcap_usd: '1600000000000', fraction: '0.25' }
+    - { mcap_usd: '1200000000000', fraction: '0.25' }
+    - { mcap_usd:  '800000000000', fraction: '0.25' }
+  soft_kill:
+    boundary: above
+    trigger_mcap_usd: '3500000000000'
+  fingerprint_prefix: spcxusdt.short_mcap.v1
+
+# Approval gate: manual ⇒ operator must approve via the openclaw round
+# trip (T4 bridge). Auto is DANGEROUS on mainnet and should never be
+# used here; dry_run is for first bring-up / smoke only.
+approval_mode: manual
+
+# ---------------------------------------------------------------------------
+# Persistent state and runtime dirs
+# ---------------------------------------------------------------------------
+# All paths must be inside the systemd unit's ReadWritePaths=
+# (default: /var/lib/xtrade /run/xtrade). Owner: xtrade:xtrade.
+
+signals_root:   /var/lib/xtrade/signals
+approvals_root: /var/lib/xtrade/approvals
+cursor_path:    /var/lib/xtrade/signals/.cursor
+sentinel_path:  /var/lib/xtrade/paused.flag
+logs_root:      /var/lib/xtrade/logs
+
+# ---------------------------------------------------------------------------
+# Mainnet venue + tight risk pointers
+# ---------------------------------------------------------------------------
+
+# T1 — mainnet venue config (environment: LIVE; gated by Lock 3 inside
+# `run_supervisor`). API key + secret are env-ref-only; the literal
+# `api_key:` / `api_secret:` field-in-yaml form is rejected by the
+# `test_mainnet_venues_yaml.py::test_plaintext_secret_field_rejected`
+# guard.
+venues_yaml: /etc/xtrade/venues.binance_futures.mainnet.yaml
+
+# T2 — mainnet-strict risk caps. assert_mainnet_risk_ceiling refuses
+# startup if any cap drifts looser than the constants documented at
+# the top of this file.
+risk_yaml:   /etc/xtrade/risk.mainnet.yaml
+
+# ---------------------------------------------------------------------------
+# Audit and disk-capacity guard (Phase 5 A2 + A4)
+# ---------------------------------------------------------------------------
+
+# Phase 5 A2 — every outbound bridge dispatch attempt is journalled under
+# `audit_root/bridge_out.<YYYY-MM-DD>.jsonl`. Mode 0640 xtrade:xtrade.
+# Holding-report (T11) and alerter (T9) write peer files
+# `holding_report.<DATE>.json` / `alerts.<DATE>.jsonl` under
+# `var_root` (see scripts/phase6/01_daily_holding_report.sh and
+# the brief §4 file layout).
+audit_root: /var/lib/xtrade/audit
+
+# Phase 5 A4 — disk-exhaustion guard. The supervisor probes
+# `shutil.disk_usage(var_root)` each iteration and pauses the
+# sentinel when used_pct ≥ disk_halt_pct (warning is operator-visible
+# but never auto-pauses).
+var_root:         /var/lib/xtrade
+disk_warn_pct:    80
+disk_halt_pct:    90
+
+# ---------------------------------------------------------------------------
+# Tuning (defaults shown — leave alone unless you know why)
+# ---------------------------------------------------------------------------
+
+# Poll cadence. Faster ⇒ lower approval-to-execution latency but more
+# venue/REST traffic. 2 s is comfortable for the SPCXUSDT use case where
+# fills are minutes-to-hours apart.
+poll_interval_s:   2.0
+
+# Per-iteration timeout passed through to the underlying live executor.
+venue_timeout_s:   60.0
+
+# Final multiplier applied to every notional before submission. Phase 6
+# brief §6 sets this to 1.0 on mainnet (the risk ceiling already binds
+# notional; an extra safety_multiplier would only confuse sizing math
+# against the ladder). Quoted string → Decimal in Python.
+safety_multiplier: '1.0'
+
+# Phase 5 A1 — reuse a single PersistentLiveExecutor across all intents.
+# Keep True on mainnet: each `node.start()` cycle is many seconds and
+# adds approval-to-fill latency.
+persistent_node: true
+
+# ---------------------------------------------------------------------------
+# Components built externally (NOT yaml-driven; documented here for the
+# operator)
+# ---------------------------------------------------------------------------
+#
+# The following supervisor knobs are constructed in code from env-vars
+# and injected on startup (see `xtrade live supervise` in
+# src/xtrade/cli.py). They are not parsed from this yaml.
+#
+#   bridge          OpenclawBridge.from_env(os.environ)
+#                   ← OPENCLAW_GATEWAY + OPENCLAW_SHARED_SECRET
+#
+#   alerter         AlertBridge.from_env(os.environ)              (T9)
+#                   ← OPENCLAW_GATEWAY + OPENCLAW_SHARED_SECRET +
+#                     XTRADE_ALERT_CHANNEL=yuanbao
+#
+#   heartbeat       HeartbeatWatcher(idle_warn_s=600,            (T9)
+#                                    idle_crit_s=1800)
+#
+#   drawdown        DrawdownWatcher(state_path=                  (T7)
+#                       /var/lib/xtrade/state/drawdown.json,
+#                       halt_pct=0.05)
+#                   + equity_provider (lambda → account equity in USD)
+#
+#   mcap_softkill   McapSoftKillWatcher(                         (T8)
+#                       meta=registry.get("SPCXUSDT-PERP.BINANCE"),
+#                       trigger_mcap_usd=Decimal("3500000000000"),
+#                       boundary="above",
+#                       consecutive_iterations=3,
+#                       state_path=/var/lib/xtrade/state/mcap_softkill.json)
+#                   + mark_provider (lambda → current mark in USD)
+#
+# These instantiations are stable across instances of the
+# mcap_anchored_ladder family — the only per-instance change is
+# `boundary` / `trigger_mcap_usd` (short bias: above + a high mcap;
+# long bias: below + a low mcap). All five components share the same
+# OpenclawBridge dispatch path so a single XTRADE_ALERT_CHANNEL config
+# routes every severity tier to the same operator endpoint.
