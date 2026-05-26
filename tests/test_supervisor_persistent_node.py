@@ -151,6 +151,11 @@ def patch_persistent_executor(monkeypatch):
     monkeypatch.setattr(pe_mod, "PersistentLiveExecutor", _factory)
     monkeypatch.setattr(factory_mod, "_assert_testnet_only", lambda _v: None)
     monkeypatch.setattr(unlock_mod, "assert_mainnet_unlock", lambda _v: None)
+    # Phase 6 T2: the supervisor now also calls `is_mainnet_venue` to
+    # decide whether to enforce `assert_mainnet_risk_ceiling`. The
+    # opaque `object()` sentinel below has no `.binance`/`.hyperliquid`
+    # attrs, so report it as testnet (no ceiling check).
+    monkeypatch.setattr(unlock_mod, "is_mainnet_venue", lambda _v: False)
     return instances
 
 

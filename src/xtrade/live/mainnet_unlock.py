@@ -54,8 +54,14 @@ class MainnetUnlockError(RuntimeError):
     """
 
 
-def _is_mainnet(venues: VenuesConfig) -> bool:
-    """True if any venue routes to a non-testnet environment."""
+def is_mainnet_venue(venues: VenuesConfig) -> bool:
+    """True if any venue routes to a non-testnet environment.
+
+    Phase 6 promoted this from `_is_mainnet` to a public helper so that
+    other supervisor-path checks (e.g. `assert_mainnet_risk_ceiling` on
+    risk config) can gate on the same mainnet detection without
+    re-implementing it.
+    """
     b = venues.binance
     if b is not None:
         if b.spot is not None and b.spot.environment not in _BINANCE_TESTNET_LIKE:
@@ -66,6 +72,11 @@ def _is_mainnet(venues: VenuesConfig) -> bool:
     if h is not None and h.environment not in _HL_TESTNET_LIKE:
         return True
     return False
+
+
+# Back-compat alias for any pre-Phase-6 internal caller; new code should
+# use the public name.
+_is_mainnet = is_mainnet_venue
 
 
 def assert_mainnet_unlock(
@@ -96,7 +107,7 @@ def assert_mainnet_unlock(
         result so they can assert `st_uid == 0` and `st_mode == 0o400`
         checks without needing actual root ownership.
     """
-    if not _is_mainnet(venues):
+    if not is_mainnet_venue(venues):
         return
 
     env_map = env if env is not None else os.environ
@@ -152,8 +163,9 @@ def assert_mainnet_unlock(
 
 
 __all__ = [
-    "MAINNET_UNLOCK_TOKEN_ENV",
     "DEFAULT_UNLOCK_PATH",
+    "MAINNET_UNLOCK_TOKEN_ENV",
     "MainnetUnlockError",
     "assert_mainnet_unlock",
+    "is_mainnet_venue",
 ]

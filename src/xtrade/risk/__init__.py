@@ -20,18 +20,25 @@ from xtrade.risk.gate import (
     RiskGate,
 )
 from xtrade.risk.rules import (
+    MAINNET_MAX_DRAWDOWN_PCT_CEILING,
+    MAINNET_MAX_NOTIONAL_CEILING_USD,
+    MainnetRiskTooLooseError,
     MaxDrawdownPct,
     MaxNotionalPerOrder,
     MaxPositionPerSymbol,
     MaxTotalNotional,
     RiskRule,
     RuleResult,
+    assert_mainnet_risk_ceiling,
     load_rules_from_yaml,
 )
 
 __all__ = [
     "DryRunReport",
     "IntentEvaluation",
+    "MAINNET_MAX_DRAWDOWN_PCT_CEILING",
+    "MAINNET_MAX_NOTIONAL_CEILING_USD",
+    "MainnetRiskTooLooseError",
     "MaxDrawdownPct",
     "MaxNotionalPerOrder",
     "MaxPositionPerSymbol",
@@ -40,6 +47,7 @@ __all__ = [
     "RiskGate",
     "RiskRule",
     "RuleResult",
+    "assert_mainnet_risk_ceiling",
     "dry_run",
     "load_rules_from_yaml",
 ]

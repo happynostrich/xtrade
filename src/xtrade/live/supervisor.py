@@ -218,9 +218,24 @@ def run_supervisor(
     # `venues_cfg=None` and bypass this check; that's intentional —
     # Lock 3 only guards real-venue runs.
     if config.venues_cfg is not None:
-        from xtrade.live.mainnet_unlock import assert_mainnet_unlock
+        from xtrade.live.mainnet_unlock import (  # noqa: PLC0415
+            assert_mainnet_unlock,
+            is_mainnet_venue,
+        )
 
         assert_mainnet_unlock(config.venues_cfg)
+
+        # Phase 6 Task T2 — mainnet-strict risk ceiling. When the
+        # supervisor is about to start with any mainnet venue, all four
+        # risk rules MUST be present *and* tight (≤ the Phase 6 caps
+        # documented in `config/risk.mainnet.yaml`). A missing rule or
+        # a looser cap raises `MainnetRiskTooLooseError` here, before
+        # the executor is created — startup aborts with a message
+        # pointing at the offending rule. Testnet runs are unaffected.
+        if is_mainnet_venue(config.venues_cfg):
+            from xtrade.risk import assert_mainnet_risk_ceiling  # noqa: PLC0415
+
+            assert_mainnet_risk_ceiling(config.risk_rules)
 
     if stop_event is None:
         stop_event = threading.Event()

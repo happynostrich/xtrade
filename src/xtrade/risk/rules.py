@@ -21,7 +21,7 @@ import abc
 import dataclasses
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
     from xtrade.strategy.base import AccountSnapshot
@@ -272,3 +272,87 @@ def load_rules_from_yaml(path: str | Path) -> list[RiskRule]:
     if "max_drawdown_pct" in raw:
         rules.append(MaxDrawdownPct(Decimal(str(raw["max_drawdown_pct"]))))
     return rules
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 Task T2 — mainnet-strict ceiling check
+# ---------------------------------------------------------------------------
+
+
+class MainnetRiskTooLooseError(RuntimeError):
+    """Raised by `assert_mainnet_risk_ceiling` when the supervisor is
+    about to start with a mainnet venue config but the loaded risk
+    rules are looser than the Phase 6 ceiling (or a required rule
+    is missing). Message names the offending rule + cap + ceiling so
+    the operator immediately knows which yaml line to tighten."""
+
+
+#: Phase 6 hard ceiling — every Max* notional rule must be ≤ this.
+MAINNET_MAX_NOTIONAL_CEILING_USD = Decimal("200")
+
+#: Phase 6 hard ceiling — drawdown rule must trip no later than this.
+MAINNET_MAX_DRAWDOWN_PCT_CEILING = Decimal("0.05")
+
+#: Rule classes that MUST be present on the mainnet risk yaml. A
+#: partial spec is treated as unsafe — missing a notional cap leaves
+#: the matching dimension uncapped, which mainnet does not tolerate.
+_REQUIRED_MAINNET_RULES: tuple[type[RiskRule], ...] = (
+    MaxNotionalPerOrder,
+    MaxPositionPerSymbol,
+    MaxTotalNotional,
+    MaxDrawdownPct,
+)
+
+
+def assert_mainnet_risk_ceiling(
+    rules: Iterable[RiskRule],
+    *,
+    notional_ceiling_usd: Decimal = MAINNET_MAX_NOTIONAL_CEILING_USD,
+    drawdown_pct_ceiling: Decimal = MAINNET_MAX_DRAWDOWN_PCT_CEILING,
+) -> None:
+    """Refuse mainnet startup when the loaded risk rules are looser
+    than the Phase 6 ceiling.
+
+    Checks:
+      * All four `Max*` rule types must be present (missing rule →
+        the matching dimension is uncapped → raise).
+      * `MaxNotionalPerOrder.usd_cap`,
+        `MaxPositionPerSymbol.usd_cap`,
+        `MaxTotalNotional.usd_cap` ≤ `notional_ceiling_usd`.
+      * `MaxDrawdownPct.pct` ≤ `drawdown_pct_ceiling`.
+
+    Caller (supervisor) only invokes this when `venues_cfg` routes
+    to a mainnet environment; testnet is unrestricted.
+    """
+    rule_by_type: dict[type[RiskRule], RiskRule] = {}
+    for rule in rules:
+        rule_by_type[type(rule)] = rule
+
+    missing = [cls.__name__ for cls in _REQUIRED_MAINNET_RULES if cls not in rule_by_type]
+    if missing:
+        raise MainnetRiskTooLooseError(
+            f"mainnet risk yaml missing required rule(s): {missing}; "
+            f"every dimension must be capped on mainnet"
+        )
+
+    notional_rules: tuple[type[RiskRule], ...] = (
+        MaxNotionalPerOrder,
+        MaxPositionPerSymbol,
+        MaxTotalNotional,
+    )
+    for cls in notional_rules:
+        rule = rule_by_type[cls]
+        cap = getattr(rule, "usd_cap")
+        if cap > notional_ceiling_usd:
+            raise MainnetRiskTooLooseError(
+                f"{cls.__name__}.usd_cap={cap} exceeds mainnet ceiling "
+                f"{notional_ceiling_usd}"
+            )
+
+    dd_rule = rule_by_type[MaxDrawdownPct]
+    dd_pct = getattr(dd_rule, "pct")
+    if dd_pct > drawdown_pct_ceiling:
+        raise MainnetRiskTooLooseError(
+            f"MaxDrawdownPct.pct={dd_pct} exceeds mainnet ceiling "
+            f"{drawdown_pct_ceiling}"
+        )

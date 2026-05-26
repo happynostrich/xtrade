@@ -1,0 +1,38 @@
+# Phase 6 Task T2 — mainnet-strict risk configuration.
+#
+# Tight by design: total $200 USDT margin, 1× isolated leverage, single
+# active strategy (SPCXUSDT short) means notional ≈ margin. The ceiling
+# check `assert_mainnet_risk_ceiling` in `xtrade.risk.rules` refuses
+# supervisor startup when ANY of these caps drift looser:
+#
+#   max_notional_per_order_usd  ≤ 200
+#   max_position_per_symbol_usd ≤ 200
+#   max_total_notional_usd      ≤ 200
+#   max_drawdown_pct            ≤ 0.05
+#
+# All four rules MUST be present on mainnet; a missing rule also
+# raises `MainnetRiskTooLooseError` (a partial spec is treated as
+# unsafe).
+#
+# Schema matches `risk.example.yaml` — flat key/value, parsed by
+# `xtrade.risk.rules.load_rules_from_yaml`.
+
+# Single-order cap. Heavy entry @ $225 × 0.66 (DCA share of $150) ≈
+# $150 leaves a $10 slip cushion under $160. Hard refusal to dump the
+# entire $200 budget into one order.
+max_notional_per_order_usd: 160
+
+# Per-symbol gross exposure cap = total margin budget. Reaching $200
+# notional with 1× isolated means margin is fully deployed.
+max_position_per_symbol_usd: 200
+
+# Portfolio-wide cap = per-symbol cap. Phase 6 only trades SPCXUSDT;
+# the equality is intentional.
+max_total_notional_usd: 200
+
+# Drawdown halt: HWM − 5% trips a halt on new exposure (reduce-only
+# intents still flow). Tight because mainnet SPCX short is "entry-
+# then-underwater-then-target" — halt is expected and the runbook
+# §11 explicitly states "halt does NOT auto-resume; operator decides
+# whether to keep waiting for the snap-back."
+max_drawdown_pct: 0.05
