@@ -1,0 +1,49 @@
+# xtrade — Binance USDS-M futures MAINNET credentials (Phase 6 Task T1).
+#
+# This is the **mainnet** counterpart to
+# `venues.binance_futures.testnet.yaml`. Phase 6 enables live trading
+# of SPCXUSDT (pre-IPO perpetual) under tight risk caps and the
+# Phase 5 third-lock unlock ritual:
+#
+#   Lock 1 — `xtrade.node.factory._assert_testnet_only` — *not*
+#            called on the supervisor path in Phase 6 (Lock 3 is the
+#            sole environment gate when venues_cfg is loaded by the
+#            supervisor). Still active in `signal_runner` / `health`
+#            / one-shot `runner` paths which remain testnet-only.
+#   Lock 2 — `xtrade.config._validate_enum` — accepts `LIVE` as a
+#            valid Binance environment value.
+#   Lock 3 — `xtrade.live.mainnet_unlock.assert_mainnet_unlock` —
+#            requires (a) `XTRADE_MAINNET_UNLOCK_TOKEN` env set,
+#            (b) `/etc/xtrade/mainnet_unlock` mode 0o400 root:root,
+#            (c) file's first line matches the env token.
+#            Operator creates the unlock file by hand before the
+#            mainnet supervisor starts.
+#
+# Brief naming note: docs/phase6_brief.md §5 T1 uses
+# `environment: MAINNET` colloquially; the canonical enum value is
+# `LIVE` (see `_VALID_BINANCE_ENVIRONMENTS` in src/xtrade/config.py).
+# Same applies to `account_type: USDT_FUTURE` (underscore, not dash).
+#
+# CRITICAL: References env-var NAMES only. Literal `api_key:` /
+# `api_secret:` fields are not parsed and MUST NEVER appear here
+# (the test guard `test_mainnet_venues_yaml.py::
+# test_plaintext_secret_field_rejected` locks this in).
+#
+# Operator runbook (Phase 6 §13):
+#   1. Generate API key on Binance USDS-M with `disable_withdrawals=true`
+#      and IP-whitelist set to the VPS public IP.
+#   2. Write the key + secret to `/etc/xtrade/env` (mode 0o600 xtrade:xtrade)
+#      as `XTRADE_MAINNET_BINANCE_FUTURES_API_KEY=<...>` and
+#      `XTRADE_MAINNET_BINANCE_FUTURES_API_SECRET=<...>`.
+#   3. Generate the unlock token, write to `/etc/xtrade/mainnet_unlock`
+#      mode 0o400 root:root.
+#   4. Export `XTRADE_MAINNET_UNLOCK_TOKEN=<same token>` in the
+#      supervisor's systemd EnvironmentFile.
+
+binance:
+  environment: LIVE                           # mainnet — gated by Lock 3
+  futures:
+    api_key_env: XTRADE_MAINNET_BINANCE_FUTURES_API_KEY
+    api_secret_env: XTRADE_MAINNET_BINANCE_FUTURES_API_SECRET
+    key_type: HMAC                            # mainnet key created as HMAC; ED25519 not used here
+    account_type: USDT_FUTURE
