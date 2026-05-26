@@ -22,6 +22,7 @@ under `logs/<run-id>/`:
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sys
 from pathlib import Path
 
@@ -1368,6 +1369,198 @@ def ops_emergency_close(
             err=True,
         )
         raise typer.Exit(code=exit_code)
+
+
+@ops_app.command("holding_report")
+def ops_holding_report(
+    date_str: str = typer.Argument(
+        ...,
+        metavar="DATE",
+        help="UTC date for the snapshot (YYYY-MM-DD).",
+    ),
+    instrument: str = typer.Option(
+        "SPCXUSDT-PERP.BINANCE",
+        "--instrument",
+        help="Nautilus instrument id.",
+    ),
+    current_mark_usd: str = typer.Option(
+        ...,
+        "--current-mark",
+        help="Current mark price (Decimal string).",
+    ),
+    soft_kill_trigger_mcap_usd: str = typer.Option(
+        "3500000000000",
+        "--soft-kill-trigger-mcap-usd",
+        help="Soft-kill mcap trigger in USD (Decimal string).",
+    ),
+    soft_kill_boundary: str = typer.Option(
+        "above",
+        "--soft-kill-boundary",
+        help="'above' (short bias) or 'below' (long bias).",
+    ),
+    direction: str = typer.Option(
+        "",
+        "--direction",
+        help="'short' or 'long'; if empty, inferred from the first entry fill.",
+    ),
+    funding_paid_cumulative_usd: str = typer.Option(
+        "0",
+        "--funding-paid-cumulative",
+        help="Cumulative funding-paid USD (operator-entered until automated).",
+    ),
+    meta_yaml: Path = typer.Option(
+        Path("config/instrument_meta.yaml"),
+        "--meta-yaml",
+        help="instrument_meta yaml path.",
+    ),
+    fills_jsonl: Path = typer.Option(
+        Path("/var/lib/xtrade/state/fills.jsonl"),
+        "--fills-jsonl",
+        help="Chronologically-ordered fills journal (one JSON object per line).",
+    ),
+    tp_ladder_json: Path = typer.Option(
+        Path("/var/lib/xtrade/state/tp_ladder.json"),
+        "--tp-ladder-json",
+        help="TP ladder snapshot json (list of {target_mcap_usd, filled_qty, open_qty}).",
+    ),
+    drawdown_state_json: Path = typer.Option(
+        Path("/var/lib/xtrade/state/drawdown.json"),
+        "--drawdown-state-json",
+        help="DrawdownWatcher state file (for hwm_drawdown_pct).",
+    ),
+    output_dir: Path = typer.Option(
+        Path("reports/phase6"),
+        "--output-dir",
+        help="Output directory; writes `<output_dir>/holding_<date>.json`.",
+    ),
+    skip_alert: bool = typer.Option(
+        False,
+        "--skip-alert",
+        help="Skip the severity=info summary alert (default off; alert is best-effort).",
+    ),
+) -> None:
+    """Compute + write the daily holding report for one instrument.
+
+    Brief §5 T11. Reads fills / ladder / drawdown state from disk,
+    aggregates them with the snapshot mark price, writes
+    `<output-dir>/holding_<DATE>.json`, and dispatches a `severity=info`
+    summary alert (best-effort; alerter env-var absence is non-fatal).
+    """
+    from xtrade.bridge.alerter import AlertBridge, AlertBridgeConfigError
+    from xtrade.instruments.meta import MetaRegistry
+    from xtrade.ops.holding_report import (
+        HoldingReportError,
+        compute_holding_report,
+        emit_report_event,
+        load_drawdown_state_pct,
+        load_fills_jsonl,
+        load_tp_ladder_json,
+        summary_alert_fields,
+        write_report_json,
+    )
+
+    # ---- parse + validate inputs -----------------------------------------
+    try:
+        report_date = dt.date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise _exit_config_error(
+            f"DATE must be YYYY-MM-DD, got {date_str!r}: {exc}"
+        ) from exc
+
+    from decimal import Decimal, InvalidOperation
+
+    def _dec(name: str, value: str) -> Decimal:
+        try:
+            return Decimal(value)
+        except (InvalidOperation, TypeError) as exc:
+            raise _exit_config_error(
+                f"--{name} must be a Decimal string, got {value!r}"
+            ) from exc
+
+    mark = _dec("current-mark", current_mark_usd)
+    trigger = _dec("soft-kill-trigger-mcap-usd", soft_kill_trigger_mcap_usd)
+    funding = _dec("funding-paid-cumulative", funding_paid_cumulative_usd)
+
+    if soft_kill_boundary not in ("above", "below"):
+        raise _exit_config_error(
+            f"--soft-kill-boundary must be 'above' or 'below', got {soft_kill_boundary!r}"
+        )
+
+    dir_opt: str | None
+    if direction == "":
+        dir_opt = None
+    elif direction in ("short", "long"):
+        dir_opt = direction
+    else:
+        raise _exit_config_error(
+            f"--direction must be 'short' or 'long' (or omitted), got {direction!r}"
+        )
+
+    try:
+        registry = MetaRegistry.load(meta_yaml)
+        meta = registry.get(instrument)
+    except Exception as exc:
+        raise _exit_config_error(
+            f"could not load instrument meta for {instrument!r} from {meta_yaml}: {exc}"
+        ) from exc
+
+    try:
+        fills = load_fills_jsonl(fills_jsonl)
+        tp_ladder = load_tp_ladder_json(tp_ladder_json)
+        hwm_dd_pct = load_drawdown_state_pct(drawdown_state_json)
+    except HoldingReportError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    # ---- aggregate -------------------------------------------------------
+    try:
+        report = compute_holding_report(
+            date=report_date,
+            instrument=instrument,
+            fills=fills,
+            current_mark_usd=mark,
+            meta=meta,
+            hwm_drawdown_pct=hwm_dd_pct,
+            tp_ladder=tp_ladder,
+            soft_kill_trigger_mcap_usd=trigger,
+            soft_kill_boundary=soft_kill_boundary,  # type: ignore[arg-type]
+            funding_paid_cumulative_usd=funding,
+            direction=dir_opt,  # type: ignore[arg-type]
+        )
+    except HoldingReportError as exc:
+        raise _exit_config_error(str(exc)) from exc
+
+    # ---- write json ------------------------------------------------------
+    out_path = output_dir / f"holding_{report_date.isoformat()}.json"
+    write_report_json(report, out_path)
+    emit_report_event(report)
+
+    # ---- dispatch info alert (best-effort) -------------------------------
+    if not skip_alert:
+        try:
+            alerter = AlertBridge.from_env(dict(os.environ))
+        except AlertBridgeConfigError:
+            alerter = None
+        if alerter is not None:
+            try:
+                alerter.dispatch_alert(
+                    severity="info",
+                    event="ops.holding_report.daily",
+                    message=(
+                        f"holding_report {report_date.isoformat()} {instrument} "
+                        f"avg={report.avg_entry_usd} mark={report.current_mark_usd}"
+                    )[:200],
+                    instrument=instrument,
+                    fields=summary_alert_fields(report),
+                )
+            except Exception:  # pragma: no cover - best-effort
+                pass
+            finally:
+                try:
+                    alerter.close()
+                except Exception:  # pragma: no cover
+                    pass
+
+    typer.echo(f"holding_report: wrote {out_path}")
 
 
 # ---------------------------------------------------------------------------
