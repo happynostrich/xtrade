@@ -1276,6 +1276,100 @@ def ops_kill(
     typer.echo(f"stopped: {supervisor_unit}")
 
 
+@ops_app.command("emergency_close")
+def ops_emergency_close(
+    instrument: str = typer.Option(
+        "SPCXUSDT-PERP.BINANCE",
+        "--instrument",
+        help="Nautilus instrument id whose open orders should be cancelled.",
+    ),
+    side: str = typer.Option(
+        "reduce-only-tp-only",
+        "--side",
+        help=(
+            "Which orders to cancel: 'reduce-only-tp-only' (default; cancels "
+            "only reduceOnly==True rows, preserves limit entry orders) or "
+            "'all' (DELETE /fapi/v1/allOpenOrders)."
+        ),
+    ),
+    venues_yaml: Path = typer.Option(
+        Path("config/venues.binance_futures.mainnet.yaml"),
+        "--venues-yaml",
+        help="Venues yaml; must define binance.futures (api_key_env / api_secret_env).",
+    ),
+    sentinel_path: Path = typer.Option(
+        Path("/run/xtrade/paused.flag"),
+        "--sentinel-path",
+        help="Sentinel flag path; written before any HTTP call.",
+    ),
+    confirm: bool = typer.Option(
+        False, "--yes", "-y", help="Required: skip interactive confirmation.",
+    ),
+) -> None:
+    """Cancel open Binance futures orders for an instrument, bypassing the supervisor.
+
+    Brief §5 T10. The default ``--side reduce-only-tp-only`` mirrors the
+    supervisor's mcap soft-kill path: only ``reduceOnly==True`` orders are
+    cancelled (TP ladder), entry limits are left in place. ``--side all``
+    issues a single bulk cancel.
+
+    Always writes the sentinel **before** touching the venue, so an
+    operator running this on a flaky link still parks the supervisor.
+
+    Exit codes:
+      0  all cancels succeeded.
+      2  at least one cancel returned non-2xx, or precondition failed.
+    """
+    from xtrade.bridge.alerter import AlertBridge, AlertBridgeConfigError
+    from xtrade.ops.emergency_close import EmergencyCloseConfigError, run
+
+    if not confirm:
+        raise _exit_config_error(
+            "refusing to cancel venue orders without --yes; this is a destructive op",
+        )
+    if side not in ("reduce-only-tp-only", "all"):
+        raise _exit_config_error(
+            f"--side must be 'reduce-only-tp-only' or 'all', got {side!r}",
+        )
+
+    alerter: AlertBridge | None
+    try:
+        alerter = AlertBridge.from_env(dict(__import__("os").environ))
+    except AlertBridgeConfigError:
+        # Best-effort: missing alert env vars must not block the cancel.
+        alerter = None
+
+    try:
+        exit_code = run(
+            side=side,  # type: ignore[arg-type]
+            instrument=instrument,
+            venues_yaml=venues_yaml,
+            sentinel_path=sentinel_path,
+            alerter=alerter,
+        )
+    except EmergencyCloseConfigError as exc:
+        raise _exit_config_error(str(exc)) from exc
+    finally:
+        if alerter is not None:
+            try:
+                alerter.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+    if exit_code == 0:
+        typer.echo(
+            f"emergency_close: OK side={side} instrument={instrument} "
+            f"sentinel={sentinel_path}",
+        )
+    else:
+        typer.echo(
+            f"emergency_close: FAILED side={side} instrument={instrument} "
+            f"sentinel={sentinel_path} (see logs for details)",
+            err=True,
+        )
+        raise typer.Exit(code=exit_code)
+
+
 # ---------------------------------------------------------------------------
 # `xtrade scan ...` (Phase 2 — opportunity discovery / scanner layer)
 # ---------------------------------------------------------------------------
