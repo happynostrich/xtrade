@@ -70,7 +70,9 @@ from typing import Any, Callable, Iterable, Mapping
 
 from xtrade.approval.gate import ApprovalDecision, ApprovalGate, ApprovalMode
 from xtrade.approval.queue import ApprovalRecord
+from xtrade.bridge.alerter import AlertBridge
 from xtrade.bridge.openclaw_webhook import OpenclawBridge
+from xtrade.live.heartbeat import HeartbeatWatcher
 from xtrade.live.sentinel import Sentinel
 from xtrade.obs import emit_event
 from xtrade.research.signals import Signal, SignalQueue
@@ -142,6 +144,16 @@ class SupervisorConfig:
     var_root: Path | None = None
     disk_warn_pct: int = 80
     disk_halt_pct: int = 90
+    # Phase 6 T9 — yuanbao alert outbound + heartbeat watchdog. Both
+    # are optional so existing Phase 4/5 tests that don't care about
+    # alerts stay green: when `alerter` is None the supervisor never
+    # touches the alert bridge; when `heartbeat` is None the watchdog
+    # is skipped each iteration. Production yaml sets `alerter` from
+    # the same `OPENCLAW_GATEWAY` / `OPENCLAW_SHARED_SECRET` env that
+    # drives the approval bridge, and binds `heartbeat` with the brief
+    # defaults `idle_warn_s=600 / idle_crit_s=1800`.
+    alerter: AlertBridge | None = None
+    heartbeat: HeartbeatWatcher | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -319,6 +331,27 @@ def run_supervisor(
         signals_root=config.signals_root,
         pending=len(pending),
     )
+    # Phase 6 T9 — one info-severity push so the operator sees
+    # `supervisor started` on yuanbao. Bridge errors here are swallowed
+    # because alert dispatch must never abort startup.
+    if config.alerter is not None:
+        try:
+            config.alerter.dispatch_alert(
+                severity="info",
+                event="supervisor.start",
+                message=(
+                    f"supervisor started instrument={config.instrument_id} "
+                    f"strategy={config.strategy_name} mode={config.approval_mode}"
+                ),
+                instrument=config.instrument_id,
+                fields={
+                    "strategy": config.strategy_name,
+                    "mode": str(config.approval_mode),
+                    "pending": len(pending),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("supervisor.start alert dispatch failed")
 
     results: list[SupervisorIterationResult] = []
     iteration = 0
@@ -363,6 +396,19 @@ def run_supervisor(
                 )
             results.append(iter_result)
 
+            # Phase 6 T9 — heartbeat watchdog. Real work = any non-zero
+            # counter in the iteration result; pure-idle polls do NOT
+            # bump `last_activity_ts` so wedged loops are visible. The
+            # tick itself is always called (one tick per iteration) so
+            # the warn/crit escalation can fire even on a silent loop.
+            if config.heartbeat is not None:
+                try:
+                    if _iteration_did_work(iter_result):
+                        config.heartbeat.record_activity(ts=now())
+                    config.heartbeat.tick(now=now())
+                except Exception:  # noqa: BLE001
+                    log.exception("supervisor.heartbeat.tick crash")
+
             # Wait one poll interval, but wake early if stop_event fires.
             stop_event.wait(config.poll_interval_s)
     finally:
@@ -392,7 +438,32 @@ def run_supervisor(
     )
     if config.bridge is not None:
         config.bridge.close()
+    if config.alerter is not None:
+        try:
+            config.alerter.close()
+        except Exception:  # noqa: BLE001
+            log.exception("supervisor.alerter.close crash")
     return results
+
+
+def _iteration_did_work(result: SupervisorIterationResult) -> bool:
+    """True iff the iteration moved any signal/intent/decision through the loop.
+
+    Used by the T9 heartbeat watcher to distinguish a silent supervisor
+    (no signals, no fills, no operator decisions) from a wedged one
+    (no ticks reaching the body at all). A paused iteration counts as
+    "no work" — pausing is itself an operator-driven state, not loop
+    liveness.
+    """
+    if result.paused:
+        return False
+    return (
+        result.signals_processed > 0
+        or result.intents_submitted > 0
+        or result.intents_parked_manual > 0
+        or result.pending_promoted > 0
+        or result.pending_rejected > 0
+    )
 
 
 # ---------------------------------------------------------------------------
