@@ -77,9 +77,11 @@ contract this module needs (`build` / `run_async` / `stop_async` /
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import json
 import logging
+import signal
 import threading
 import time
 from concurrent.futures import Future
@@ -96,6 +98,36 @@ log = logging.getLogger("xtrade.live.persistent_executor")
 # environments that have no `nautilus_trader` wheel. Tests that do not
 # inject a stub `build_testnet_node` will not exercise this module's
 # Nautilus path at all.
+
+
+@contextlib.contextmanager
+def _suppress_main_thread_signal_install() -> Any:
+    """Temporarily neutralise ``signal.signal`` during Nautilus node build.
+
+    Nautilus 1.227.0's ``NautilusKernel._setup_loop`` calls
+    ``signal.signal(SIGINT, SIG_DFL)`` unconditionally during
+    ``node.build()`` (system/kernel.py:562) and then
+    ``loop.add_signal_handler`` for SIGTERM/SIGINT/SIGABRT
+    (system/kernel.py:566). Both APIs require the *main thread of the
+    main interpreter*; we run the node in a dedicated background
+    thread (see module docstring on `Why a background thread`), so the
+    unmodified call raises ``ValueError: signal only works in main
+    thread of the main interpreter`` and the supervisor enters a
+    crash-restart loop.
+
+    The supervisor itself installs SIGTERM/SIGINT handlers in the main
+    thread before this executor is started (see
+    `xtrade.live.supervisor`), so it is safe to swallow Nautilus's
+    duplicate install attempt here. The companion patch on
+    ``loop.add_signal_handler`` is applied directly on the loop
+    instance in `_thread_main`.
+    """
+    original = signal.signal
+    signal.signal = lambda *_a, **_kw: None  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        signal.signal = original  # type: ignore[assignment]
 
 
 class PersistentLiveExecutorError(RuntimeError):
@@ -327,8 +359,20 @@ class PersistentLiveExecutor:
         """Entry point for the node-owning background thread."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        # Nautilus's NautilusKernel._setup_loop installs SIGINT/SIGTERM
+        # handlers on the event loop during node.build(). Those calls
+        # require the main thread of the main interpreter; this thread
+        # is not the main thread. See _suppress_main_thread_signal_install
+        # for the matching signal.signal patch.
+        self._loop.add_signal_handler = (  # type: ignore[method-assign]
+            lambda *_a, **_kw: None
+        )
+        self._loop.remove_signal_handler = (  # type: ignore[method-assign]
+            lambda *_a, **_kw: True
+        )
         try:
-            self._loop.run_until_complete(self._async_init())
+            with _suppress_main_thread_signal_install():
+                self._loop.run_until_complete(self._async_init())
         except BaseException as exc:  # noqa: BLE001
             self._start_error = exc
             log.exception("persistent_executor.init.crash")

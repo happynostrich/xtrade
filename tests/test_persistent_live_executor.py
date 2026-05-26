@@ -348,6 +348,81 @@ def test_unsupported_strategy_raises(stub_node, tmp_path: Path) -> None:
         executor.stop()
 
 
+# --- signal-handler workaround (A6 / mainnet crash-loop fix) ----------
+
+
+def test_thread_main_neutralises_signal_signal_and_add_signal_handler(
+    stub_node_factory, tmp_path: Path
+) -> None:
+    """Nautilus's NautilusKernel._setup_loop calls ``signal.signal`` and
+    ``loop.add_signal_handler`` during ``node.build()``. Both raise
+    ``ValueError: signal only works in main thread of the main
+    interpreter`` when invoked from our background thread, which
+    triggered the May-2026 supervisor crash-restart loop.
+
+    This test stubs a node whose ``build()`` exercises both APIs and
+    asserts the executor reaches READY (i.e. the workaround installed
+    in ``_thread_main`` neutralises both calls in the node thread).
+    """
+    import signal as _signal
+
+    observed: dict[str, Any] = {
+        "signal_signal_called": False,
+        "add_signal_handler_called": False,
+    }
+
+    class _SigSnoopNode(_StubNode):
+        def build(self) -> None:
+            super().build()
+            # Mimic kernel.py:562 — signal.signal from non-main thread
+            # raises ValueError unless the workaround neutralises it.
+            _signal.signal(_signal.SIGINT, _signal.SIG_DFL)
+            observed["signal_signal_called"] = True
+            # Mimic kernel.py:566 — loop.add_signal_handler also
+            # requires the main thread without the workaround.
+            loop = asyncio.get_event_loop()
+            loop.add_signal_handler(_signal.SIGTERM, lambda: None)
+            observed["add_signal_handler_called"] = True
+
+    def _factory(venues_cfg, *, trader_id, log_level, log_directory):  # noqa: ARG001
+        return _SigSnoopNode()
+
+    stub_node_factory(_factory)
+    executor = PersistentLiveExecutor(
+        venues_cfg=object(),
+        logs_root=tmp_path,
+        startup_timeout_s=5.0,
+    )
+    executor.start()
+    try:
+        assert executor.state == "ready"
+        assert observed["signal_signal_called"] is True
+        assert observed["add_signal_handler_called"] is True
+    finally:
+        executor.stop()
+
+
+def test_suppress_main_thread_signal_install_restores_signal_signal() -> None:
+    """The context manager must restore the original ``signal.signal``
+    even if the wrapped block raises.
+    """
+    import signal as _signal
+
+    from xtrade.live.persistent_executor import (
+        _suppress_main_thread_signal_install,
+    )
+
+    original = _signal.signal
+    with _suppress_main_thread_signal_install():
+        assert _signal.signal is not original
+    assert _signal.signal is original
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with _suppress_main_thread_signal_install():
+            raise RuntimeError("boom")
+    assert _signal.signal is original
+
+
 # --- import isolation --------------------------------------------------
 
 
