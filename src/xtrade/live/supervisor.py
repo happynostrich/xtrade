@@ -74,6 +74,7 @@ from xtrade.bridge.alerter import AlertBridge
 from xtrade.bridge.openclaw_webhook import OpenclawBridge
 from xtrade.live.drawdown import DrawdownWatcher
 from xtrade.live.heartbeat import HeartbeatWatcher
+from xtrade.live.mcap_softkill import McapSoftKillWatcher
 from xtrade.live.sentinel import Sentinel
 from xtrade.obs import emit_event
 from xtrade.research.signals import Signal, SignalQueue
@@ -164,6 +165,15 @@ class SupervisorConfig:
     # them None and the supervisor skips the probe entirely.
     drawdown: DrawdownWatcher | None = None
     equity_provider: Callable[[], Decimal] | None = None
+    # Phase 6 T8 — mcap soft-kill watchdog. Each non-paused iteration
+    # the supervisor reads the current mark via `mark_provider()` and
+    # calls `mcap_softkill.update(now, mark)`. On the iteration that
+    # crosses the consecutive-breach threshold the watcher itself
+    # writes the sentinel, runs the emergency_close runner, and pushes
+    # a crit alert. Both fields are optional — Phase 4/5 tests that
+    # don't care leave them None and the probe is skipped entirely.
+    mcap_softkill: McapSoftKillWatcher | None = None
+    mark_provider: Callable[[], Decimal] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -421,6 +431,22 @@ def run_supervisor(
                     config.drawdown.update(now=now(), equity_usd=equity_usd)
                 except Exception:  # noqa: BLE001
                     log.exception("supervisor.drawdown.update crash")
+
+            # Phase 6 T8 — mcap soft-kill watchdog. Skip when this
+            # iteration was paused (the sentinel is already raised; we
+            # don't want to overwrite an existing soft-kill or
+            # operator-pause reason). Provider failures are swallowed
+            # so a mark-feed glitch never crashes the supervisor.
+            if (
+                config.mcap_softkill is not None
+                and config.mark_provider is not None
+                and not iter_result.paused
+            ):
+                try:
+                    mark = config.mark_provider()
+                    config.mcap_softkill.update(now=now(), mark=mark)
+                except Exception:  # noqa: BLE001
+                    log.exception("supervisor.mcap_softkill.update crash")
 
             # Phase 6 T9 — heartbeat watchdog. Real work = any non-zero
             # counter in the iteration result; pure-idle polls do NOT
