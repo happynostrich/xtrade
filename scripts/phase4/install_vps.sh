@@ -171,6 +171,16 @@ if ! grep -q '^HOME=' "$ETC_XTRADE/env" 2>/dev/null; then
     printf 'HOME=%s\n' "$VAR_XTRADE" >> "$ETC_XTRADE/env"
     echo "[+] appended HOME to $ETC_XTRADE/env"
 fi
+# Phase 6 follow-up: when xtrade is installed into the .venv (vs run
+# from a source checkout), `xtrade.observability.DEFAULT_LOGS_ROOT`
+# resolves to a path inside the venv tree which is read-only under
+# `ProtectSystem=strict`. Seed `XTRADE_LOGS_ROOT` so any CLI entry
+# that did not get an explicit `--logs-root` falls back to a writable
+# location under `ReadWritePaths=`.
+if ! grep -q '^XTRADE_LOGS_ROOT=' "$ETC_XTRADE/env" 2>/dev/null; then
+    printf 'XTRADE_LOGS_ROOT=%s/logs\n' "$VAR_XTRADE" >> "$ETC_XTRADE/env"
+    echo "[+] appended XTRADE_LOGS_ROOT to $ETC_XTRADE/env"
+fi
 
 # --- systemd unit render --------------------------------------------------
 export OPT_XTRADE VAR_XTRADE ETC_XTRADE XTRADE_USER XTRADE_GROUP

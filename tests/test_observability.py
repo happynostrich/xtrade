@@ -23,6 +23,7 @@ from xtrade.config import (
 )
 from xtrade.observability import (
     DEFAULT_LOGS_ROOT,
+    LOGS_ROOT_ENV_VAR,
     RunContext,
     resolve_logs_root,
     resolve_run_id,
@@ -56,7 +57,8 @@ def test_resolve_run_id_uses_mode_prefix() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_logs_root_default() -> None:
+def test_resolve_logs_root_default(monkeypatch) -> None:
+    monkeypatch.delenv(LOGS_ROOT_ENV_VAR, raising=False)
     assert resolve_logs_root(None) == DEFAULT_LOGS_ROOT
 
 
@@ -66,6 +68,31 @@ def test_resolve_logs_root_override_path(tmp_path) -> None:
 
 def test_resolve_logs_root_override_string(tmp_path) -> None:
     assert resolve_logs_root(str(tmp_path)) == tmp_path
+
+
+def test_resolve_logs_root_env_override(tmp_path, monkeypatch) -> None:
+    # When no explicit argument is supplied, the env var takes precedence
+    # over the repo-relative default. This is what saves the systemd
+    # scanner unit from writing into `<venv>/lib/python3.12/logs` when
+    # xtrade is installed (not run from a source checkout).
+    monkeypatch.setenv(LOGS_ROOT_ENV_VAR, str(tmp_path))
+    assert resolve_logs_root(None) == tmp_path
+
+
+def test_resolve_logs_root_supplied_beats_env(tmp_path, monkeypatch) -> None:
+    # Explicit argument always wins over the env var so `--logs-root`
+    # on a CLI command is authoritative.
+    monkeypatch.setenv(LOGS_ROOT_ENV_VAR, str(tmp_path / "envdir"))
+    explicit = tmp_path / "argdir"
+    assert resolve_logs_root(explicit) == explicit
+
+
+def test_resolve_logs_root_empty_env_falls_back(monkeypatch) -> None:
+    # An empty string in the env var must be treated as unset (a common
+    # systemd EnvironmentFile artefact when a placeholder line like
+    # `XTRADE_LOGS_ROOT=` is left in /etc/xtrade/env).
+    monkeypatch.setenv(LOGS_ROOT_ENV_VAR, "")
+    assert resolve_logs_root(None) == DEFAULT_LOGS_ROOT
 
 
 # ---------------------------------------------------------------------------

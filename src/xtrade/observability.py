@@ -31,6 +31,7 @@ Exit-code policy is enforced by the CLI:
 from __future__ import annotations
 
 import datetime as dt
+import os
 import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -40,9 +41,21 @@ from typing import Iterator
 from xtrade.config import VenuesConfig
 
 
-# Default logs root sits next to `src/` in the repo.
+# Default logs root sits next to `src/` in the repo. The `parents[2]`
+# heuristic only resolves correctly when running from a source checkout;
+# when xtrade is installed into a venv (`.venv/lib/pythonX.Y/site-packages/
+# xtrade/observability.py`), `parents[2]` lands inside the venv tree,
+# which is read-only under `ProtectSystem=strict`. In that case the
+# operator MUST set `XTRADE_LOGS_ROOT` (or pass `--logs-root` /
+# `logs_root=` to the call site) to a writable path under
+# `ReadWritePaths=` — see `resolve_logs_root` below.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOGS_ROOT = REPO_ROOT / "logs"
+
+# Env-var name honored by `resolve_logs_root` when no explicit value is
+# supplied. Systemd units source `/etc/xtrade/env` which sets this to
+# `/var/lib/xtrade/logs` on VPS installs.
+LOGS_ROOT_ENV_VAR = "XTRADE_LOGS_ROOT"
 
 
 @dataclass(frozen=True)
@@ -75,10 +88,20 @@ def resolve_run_id(supplied: str | None, *, mode: str) -> str:
 
 
 def resolve_logs_root(supplied: Path | str | None) -> Path:
-    """Return `supplied` if given (cast to `Path`), else `<repo>/logs`."""
-    if supplied is None:
-        return DEFAULT_LOGS_ROOT
-    return Path(supplied)
+    """Return the first non-empty source in this priority order:
+
+    1. ``supplied`` (explicit caller argument; e.g. CLI ``--logs-root``).
+    2. ``XTRADE_LOGS_ROOT`` env var (set by the systemd EnvironmentFile
+       on VPS installs so installed wheels don't fall back to a
+       venv-internal path).
+    3. ``DEFAULT_LOGS_ROOT`` — only safe in source-checkout dev.
+    """
+    if supplied is not None:
+        return Path(supplied)
+    env_root = os.environ.get(LOGS_ROOT_ENV_VAR)
+    if env_root:
+        return Path(env_root)
+    return DEFAULT_LOGS_ROOT
 
 
 # ---------------------------------------------------------------------------

@@ -147,6 +147,22 @@ def test_scanner_service_is_oneshot() -> None:
     assert "Restart=on-failure" not in text
 
 
+def test_scanner_service_passes_logs_root_under_var() -> None:
+    # The scanner unit MUST pass --logs-root to `xtrade scan run` pointing
+    # at a writable path under VAR_XTRADE. Otherwise, when xtrade is
+    # installed into the venv, `observability.DEFAULT_LOGS_ROOT` resolves
+    # to a path inside the venv tree which is read-only under
+    # `ProtectSystem=strict` and the scanner crashes on first mkdir.
+    text = _render("xtrade-scanner.service")
+    exec_lines = [l for l in text.splitlines() if l.startswith("ExecStart=")]
+    assert exec_lines, "ExecStart missing from scanner unit"
+    cmd = exec_lines[0]
+    assert "--logs-root" in cmd, "scanner ExecStart missing --logs-root flag"
+    assert f"{ENV['VAR_XTRADE']}/logs" in cmd, (
+        f"scanner --logs-root must point under {ENV['VAR_XTRADE']}; got: {cmd}"
+    )
+
+
 def test_scanner_timer_cadence() -> None:
     text = _render("xtrade-scanner.timer")
     assert "OnUnitActiveSec=5min" in text

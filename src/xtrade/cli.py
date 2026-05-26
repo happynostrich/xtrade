@@ -1634,6 +1634,16 @@ def scan_run(
     run_id: str | None = typer.Option(
         None, "--run-id", help="Override the auto-generated run id."
     ),
+    logs_root: Path | None = typer.Option(
+        None,
+        "--logs-root",
+        help=(
+            "Logs root directory (default: $XTRADE_LOGS_ROOT, then "
+            "<repo>/logs). Must be writable; on VPS installs set this "
+            "to /var/lib/xtrade/logs so the venv-internal default is "
+            "not used."
+        ),
+    ),
 ) -> None:
     """Run one scanner over a universe and write signals to the queue."""
     from xtrade.observability import run_with_logging
@@ -1652,7 +1662,9 @@ def scan_run(
         raise _exit_config_error(f"--until ({until}) must be after --since ({since})")
 
     try:
-        with run_with_logging(mode="scan", run_id=run_id) as ctx:
+        with run_with_logging(
+            mode="scan", run_id=run_id, logs_root=logs_root
+        ) as ctx:
             result = run_scan(
                 universe_path=universe_path,
                 scanner_name=scanner,
