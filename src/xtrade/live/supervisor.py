@@ -72,6 +72,7 @@ from xtrade.approval.gate import ApprovalDecision, ApprovalGate, ApprovalMode
 from xtrade.approval.queue import ApprovalRecord
 from xtrade.bridge.alerter import AlertBridge
 from xtrade.bridge.openclaw_webhook import OpenclawBridge
+from xtrade.live.drawdown import DrawdownWatcher
 from xtrade.live.heartbeat import HeartbeatWatcher
 from xtrade.live.sentinel import Sentinel
 from xtrade.obs import emit_event
@@ -154,6 +155,15 @@ class SupervisorConfig:
     # defaults `idle_warn_s=600 / idle_crit_s=1800`.
     alerter: AlertBridge | None = None
     heartbeat: HeartbeatWatcher | None = None
+    # Phase 6 T7 — drawdown watchdog. Held alongside `equity_provider`,
+    # a no-arg callable that returns the current account equity in USD
+    # (Decimal). Each non-paused iteration the supervisor reads equity
+    # and calls `drawdown.update(...)`; a breach above `halt_pct`
+    # pauses the sentinel + pushes a crit alert. Both fields are
+    # optional — Phase 4/5 tests that don't care about drawdown leave
+    # them None and the supervisor skips the probe entirely.
+    drawdown: DrawdownWatcher | None = None
+    equity_provider: Callable[[], Decimal] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -395,6 +405,22 @@ def run_supervisor(
                     errors=(f"{type(exc).__name__}: {exc}",),
                 )
             results.append(iter_result)
+
+            # Phase 6 T7 — drawdown watchdog. Skip when this iteration
+            # was paused (the sentinel is already raised; we don't want
+            # to layer a second `drawdown.halt:` reason on top of the
+            # existing one). Failures here are swallowed: a missing or
+            # throwing equity provider must not crash the supervisor.
+            if (
+                config.drawdown is not None
+                and config.equity_provider is not None
+                and not iter_result.paused
+            ):
+                try:
+                    equity_usd = config.equity_provider()
+                    config.drawdown.update(now=now(), equity_usd=equity_usd)
+                except Exception:  # noqa: BLE001
+                    log.exception("supervisor.drawdown.update crash")
 
             # Phase 6 T9 — heartbeat watchdog. Real work = any non-zero
             # counter in the iteration result; pure-idle polls do NOT
