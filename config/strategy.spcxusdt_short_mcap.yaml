@@ -1,0 +1,82 @@
+# Phase 6 Task T5 — SPCXUSDT short-mcap strategy instance.
+#
+# Plugin: `mcap_anchored_ladder` (kind = direction-parameterised
+# market-cap-anchored ladder, see
+# `src/xtrade/strategy/plugins/mcap_anchored_ladder.py`).
+# Instance: first live deployment — SPCX short direction. Same plugin
+# code is reused for future long-direction instances by simply flipping
+# `direction: long` and mirroring the TP ladder direction in a new yaml.
+#
+# Brief mapping (docs/phase6_brief.md §1 SPCX defaults table → plugin
+# yaml dialect):
+#
+#   brief                              yaml field used here
+#   ─────                              ────────────────────
+#   heavy_entry.margin_usd: 150        heavy_entry.qty: 0.666
+#     (= 150 / 225 trigger, 1× lev,
+#      quantized to qty_step 0.001)
+#   dca_entry.daily_margin_usd: 10     dca_entry.qty: 0.047
+#     (= 10 / 210 trigger, 1× lev,
+#      quantized to qty_step 0.001)
+#   dca_entry.max_days: 5              <not enforced by plugin>; the
+#                                      scanner's daily fingerprint
+#                                      bounds total dca count instead.
+#   margin_budget_usd: 200             <documented in brief §1; not a
+#                                      plugin field — supervisor-level
+#                                      MaxTotalNotional risk rule
+#                                      ($200 cap from risk.mainnet.yaml)
+#                                      enforces this bound.>
+#
+# `meta` is **not** carried in this yaml: it is injected by the strategy
+# loader at runtime from `config/instrument_meta.yaml` (T3 MetaRegistry).
+# Tests pass an in-memory InstrumentMeta directly.
+
+strategy_name: mcap_anchored_ladder
+strategy_instance_id: spcxusdt_short_mcap
+
+strategy_config:
+  # --- direction + venue/instrument ---
+  direction: short
+  instrument: SPCXUSDT-PERP.BINANCE
+  venue: BINANCE
+
+  # --- sizing primitive (T4 McapAnchoredSizer) ---
+  # Validated against requested_leverage at `heavy_entry.trigger_mark_usd`
+  # in the strategy ctor; raises LeverageExceedsMcapCeilingError if the
+  # request would push P_liq inside $4T mcap.
+  leverage: 1
+  mmr: '0.025'
+  target_mcap_liq_usd: '4000000000000'
+
+  # --- heavy first-entry (one-shot per process lifetime) ---
+  heavy_entry:
+    trigger_mark_usd: '225'
+    qty: '0.666'                # = 150 margin / 225 entry @ 1× lev, qty_step 0.001
+
+  # --- daily DCA (one-shot per UTC day; dedup is in-plugin) ---
+  dca_entry:
+    trigger_mark_usd: '210'
+    qty: '0.047'                # = 10 daily margin / 210 entry @ 1× lev, qty_step 0.001
+
+  # --- TP ladder: 4 equal-weight rungs, descending mcap (short profits
+  # as mcap falls). Quantities are derived per-rung from the current
+  # |position| at ladder-build time; the fractions sum to 1.0.
+  tp_ladder:
+    - { mcap_usd: '2000000000000', fraction: '0.25' }   # mark ≈ 168.49
+    - { mcap_usd: '1600000000000', fraction: '0.25' }   # mark ≈ 134.79
+    - { mcap_usd: '1200000000000', fraction: '0.25' }   # mark ≈ 101.10
+    - { mcap_usd:  '800000000000', fraction: '0.25' }   # mark ≈  67.40
+
+  # --- soft kill: T8 watcher triggers when mcap crosses ABOVE $3.5T
+  # for 3 consecutive iterations; strategy reacts by cancelling all
+  # open TP orders and refusing to (re)enter. The watcher itself lives
+  # in `src/xtrade/live/mcap_softkill.py` (T8).
+  soft_kill:
+    boundary: above
+    trigger_mcap_usd: '3500000000000'
+
+  # --- fingerprint prefix (audit / journal) ---
+  # Matches the scanner's `fingerprint_prefix: spcxusdt.short_mcap.v1`
+  # so heavy/dca/tp orders cluster under the same instance label in
+  # audit and approval queue listings.
+  fingerprint_prefix: spcxusdt.short_mcap.v1
