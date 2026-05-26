@@ -23,13 +23,19 @@ from xtrade.research.scanners.breakout import BreakoutScanner
 from xtrade.research.scanners.mean_reversion import MeanReversionScanner
 from xtrade.research.scanners.momentum import MomentumScanner
 from xtrade.research.scanners.spread import SpreadScanner
+from xtrade.research.scanners.threshold_ladder_entry import (
+    ScannerConfigError,
+    ThresholdLadderEntryScanner,
+)
 
 __all__ = [
     "BreakoutScanner",
     "MeanReversionScanner",
     "MomentumScanner",
     "Scanner",
+    "ScannerConfigError",
     "SpreadScanner",
+    "ThresholdLadderEntryScanner",
     "available_scanners",
     "get_scanner",
     "register_scanner",

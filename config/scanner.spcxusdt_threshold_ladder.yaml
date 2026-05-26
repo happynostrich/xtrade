@@ -1,0 +1,50 @@
+# Phase 6 Task T6 — SPCXUSDT threshold-ladder scanner instance.
+#
+# Plugin: `threshold_ladder_entry` (kind = direction-parameterised
+# threshold-crossing streaming scanner, see
+# `src/xtrade/research/scanners/threshold_ladder_entry.py`).
+# Instance: first live deployment — SPCX short direction. The same
+# scanner class serves future long-direction instances by flipping
+# `direction: below` and inverting heavy/dca triggers in a new yaml.
+#
+# Pairs with the T5 strategy instance `strategy.spcxusdt_short_mcap.yaml`
+# — `fingerprint_prefix` matches so the cross-layer audit chain
+# (scanner.<prefix>.heavy.v1 → strategy.<prefix>.heavy → tp_ladder)
+# clusters under a single instance label in the approval queue listing.
+#
+# Brief mapping (docs/phase6_brief.md §1 + §5 T6):
+#   - direction=above (short-style): emit when SPCX mark crosses ≥ trigger.
+#   - heavy fires once per scanner lifetime (lifetime fingerprint).
+#   - dca fires at most once per UTC day (daily fingerprint).
+#
+# `meta` is **not** carried here: the supervisor loader passes the
+# `InstrumentMeta` for `instrument` directly into the scanner ctor from
+# `config/instrument_meta.yaml` (T3 MetaRegistry).
+
+scanner_name: threshold_ladder_entry
+scanner_instance_id: spcxusdt_threshold_ladder
+
+scanner_config:
+  # --- instrument / venue (must match InstrumentMeta.symbol) ---
+  instrument: SPCXUSDT-PERP.BINANCE
+  venue: BINANCE
+
+  # --- direction ---
+  # `above` ⇒ short-style (Signal.direction=SHORT, intent_side=SELL).
+  # `below` ⇒ long-style  (Signal.direction=LONG,  intent_side=BUY).
+  direction: above
+
+  # --- heavy first-entry (lifetime one-shot) ---
+  heavy_trigger_mark_usd: '225'
+  heavy_margin_usd: '150'
+
+  # --- daily DCA (UTC-day one-shot; below heavy for direction=above) ---
+  dca_trigger_mark_usd: '210'
+  dca_margin_usd: '10'
+  dca_window: daily
+
+  # --- audit / dedup namespace (matches strategy yaml) ---
+  fingerprint_prefix: spcxusdt.short_mcap.v1
+
+  # --- optional limit price skew (audit-only at scanner layer) ---
+  limit_price_bps_offset: '5'
